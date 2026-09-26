@@ -22,8 +22,8 @@ export interface ParsedDoc {
   paragraphs: number;
 }
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
-const MAX_TEXT_LENGTH = 300_000; // ~50.000 palabras
+const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
+const MAX_TEXT_LENGTH = 2_000_000; // ~320.000 palabras
 const SUPPORTED_EXTENSIONS = ["pdf", "docx", "txt", "md", "csv"];
 
 class ParseError extends Error {}
@@ -43,7 +43,7 @@ async function extractPdf(file: File): Promise<string> {
   const data = new Uint8Array(await file.arrayBuffer());
   const doc = await pdfjs.getDocument({ data }).promise;
 
-  const maxPages = Math.min(doc.numPages, 400);
+  const maxPages = Math.min(doc.numPages, 2000);
   let rawText = "";
   for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
     const page = await doc.getPage(pageNum);
@@ -87,7 +87,7 @@ export async function parseFileClient(file: File): Promise<ParsedDoc> {
     throw new ParseError("El archivo está vacío.");
   }
   if (file.size > MAX_FILE_SIZE) {
-    throw new ParseError("El archivo supera el límite de 20 MB.");
+    throw new ParseError("El archivo supera el límite de 200 MB.");
   }
   if (!SUPPORTED_EXTENSIONS.includes(ext)) {
     throw new ParseError(

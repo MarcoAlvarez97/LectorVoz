@@ -9,18 +9,6 @@
  *  - Sin conexión → priorizamos voces locales (voice.localService).
  */
 
-export interface VoiceOption {
-  /** Identificador único de la voz (voiceURI) */
-  uri: string;
-  name: string;
-  /** true si la voz está instalada en el dispositivo → funciona offline */
-  local: boolean;
-  /** true si es una voz neuronal/natural (suena mucho mejor; algunas requieren internet) */
-  natural: boolean;
-  lang: string;
-  gender: "female" | "male" | "unknown";
-}
-
 const FEMALE_HINTS = [
   "sabina",
   "helena",
@@ -113,14 +101,6 @@ function isNaturalVoice(name: string): boolean {
   return /natural|google|neural|neuronal|online/i.test(name);
 }
 
-/** Clasifica el género probable de una voz por su nombre */
-function classifyGender(name: string): "female" | "male" | "unknown" {
-  const lower = name.toLowerCase();
-  if (FEMALE_HINTS.some((hint) => lower.includes(hint))) return "female";
-  if (MALE_HINTS.some((hint) => lower.includes(hint))) return "male";
-  return "unknown";
-}
-
 /** Devuelve todas las voces en español disponibles en el dispositivo */
 export function getSpanishVoices(): SpeechSynthesisVoice[] {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return [];
@@ -130,31 +110,8 @@ export function getSpanishVoices(): SpeechSynthesisVoice[] {
 }
 
 /**
- * Lista completa de voces en español para el selector.
- * Orden: locales primero (offline), luego por género conocido y nombre.
- */
-export function getSpanishVoiceOptions(): VoiceOption[] {
-  return getSpanishVoices()
-    .map((v) => ({
-      uri: v.voiceURI,
-      name: v.name,
-      local: v.localService,
-      natural: isNaturalVoice(v.name),
-      lang: v.lang,
-      gender: classifyGender(v.name),
-    }))
-    .sort((a, b) => {
-      if (a.local !== b.local) return a.local ? -1 : 1;
-      if (a.natural !== b.natural) return a.natural ? -1 : 1;
-      const ga = a.gender === "unknown" ? 1 : 0;
-      const gb = b.gender === "unknown" ? 1 : 0;
-      if (ga !== gb) return ga - gb;
-      return a.name.localeCompare(b.name, "es");
-    });
-}
-
-/**
- * Elige la mejor voz en español según el género (y una voz preferida opcional).
+ * Elige automáticamente LA mejor voz en español para el género pedido.
+ * (La app ofrece exactamente una voz por género: mujer u hombre.)
  *
  * Con internet: prioriza las voces neuronales/naturales del género pedido
  * (Edge "Natural", Google…), que suenan mucho mejor que las clásicas.
@@ -162,16 +119,10 @@ export function getSpanishVoiceOptions(): VoiceOption[] {
  */
 export function pickSpanishVoice(
   gender: "female" | "male",
-  preferredUri?: string | null,
   online = true
 ): SpeechSynthesisVoice | null {
   const voices = getSpanishVoices();
   if (voices.length === 0) return null;
-
-  if (preferredUri) {
-    const preferred = voices.find((v) => v.voiceURI === preferredUri);
-    if (preferred) return preferred;
-  }
 
   const hints = gender === "female" ? FEMALE_HINTS : MALE_HINTS;
   const matchesGender = (v: SpeechSynthesisVoice) =>

@@ -22,14 +22,14 @@ import {
 import { PlayerBar, type PlayerState } from "@/components/lector/player-bar";
 import { WalkingMode } from "@/components/lector/walking-mode";
 import {
-  getSpanishVoiceOptions,
   pickSpanishVoice,
   supportsSpeech,
-  type VoiceOption,
 } from "@/lib/browser-voice";
 import { parseFileClient } from "@/lib/parse-client";
 import { InstallButton, OfflineBadge } from "@/components/lector/pwa";
+import { ThemeToggle } from "@/components/lector/theme-toggle";
 import {
+  splitSpeechSegments,
   estimateSeconds,
   formatDuration,
   splitTextIntoChunks,
@@ -66,8 +66,6 @@ export default function Home() {
   const [isLoadingChunk, setIsLoadingChunk] = useState(false);
   const [engine, setEngine] = useState<TtsEngine>("browser");
   const [voice, setVoice] = useState<VoiceGender>("female");
-  const [voiceUri, setVoiceUri] = useState<string | null>(null);
-  const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [isOffline, setIsOffline] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [walkingOpen, setWalkingOpen] = useState(false);
@@ -82,23 +80,20 @@ export default function Home() {
   const playingKeyRef = useRef<string>("");
   const engineRef = useRef<TtsEngine>(engine);
   const voiceRef = useRef(voice);
-  const voiceUriRef = useRef<string | null>(voiceUri);
   const speedRef = useRef(speed);
   const stateRef = useRef<PlayerState>(state);
   const chunksRef = useRef(chunks);
   const isOfflineRef = useRef(isOffline);
   const consecutiveFailuresRef = useRef(0);
   const activeChunkElRef = useRef<HTMLParagraphElement | null>(null);
-  const speedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  /** Última posición de lectura (palabra actual) para cambiar velocidad/voz sin volver al inicio */
+  /** Última posición de lectura (palabra actual) para cambiar de voz sin volver al inicio */
   const lastBoundaryRef = useRef<{ index: number; charIndex: number }>({ index: 0, charIndex: 0 });
-  /** Cambio de velocidad en pausa: se aplica al reanudar, volviendo a leer desde la palabra actual */
-  const pendingRespeakRef = useRef(false);
+  /** Voz cambiada en pausa: al reanudar se vuelve a hablar desde la palabra actual */
+  const pendingRestartRef = useRef(false);
 
   engineRef.current = engine;
   voiceRef.current = voice;
-  voiceUriRef.current = voiceUri;
   speedRef.current = speed;
   stateRef.current = state;
   chunksRef.current = chunks;
@@ -131,17 +126,6 @@ export default function Home() {
       for (const url of cacheRef.current.values()) URL.revokeObjectURL(url);
       cacheRef.current.clear();
     };
-  }, []);
-
-  // ---------- Voces del dispositivo (Web Speech API) ----------
-
-  useEffect(() => {
-    if (!supportsSpeech()) return;
-    const load = () => setVoiceOptions(getSpanishVoiceOptions());
-    load();
-    // Chrome carga las voces de forma asíncrona
-    window.speechSynthesis.addEventListener?.("voiceschanged", load);
-    return () => window.speechSynthesis.removeEventListener?.("voiceschanged", load);
   }, []);
 
   // ---------- Conexión: al perder internet se fuerza el motor del navegador ----------
@@ -218,7 +202,13 @@ export default function Home() {
     }, 10_000);
   }, [stopResumeWatchdog]);
 
-  /** Lee un fragmento con la voz del navegador */
+  /** Lee un fragmento con la voz del navegador, ORACIÓN POR ORACIÓN.
+   *
+   *  Cada oración se crea justo antes de hablarse y toma la velocidad vigente
+   *  en ese momento: así, cambiar la velocidad NUNCA reinicia ni corta la
+   *  lectura — la oración actual termina a la velocidad anterior y la siguiente
+   *  ya va a la nueva. startChar > 0 permite retomar desde una palabra concreta
+   *  (cambio de voz o salto con la barra de progreso). */
   const speakChunkBrowser = useCallback(
     (index: number, token: number, startChar = 0) => {
       const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
@@ -234,10 +224,16 @@ export default function Home() {
       }
 
       const fullText = chunksRef.current[index]?.text ?? "";
-      // startChar > 0 → reanuda desde una palabra concreta (cambio de velocidad/voz sin reiniciar)
-      const text = startChar > 0 ? fullText.slice(startChar) : fullText;
-      lastBoundaryRef.current = { index, charIndex: startChar };
-      if (!text.trim()) {
+      let from = Math.min(Math.max(0, startChar), fullText.length);
+      // Si caemos a mitad de palabra, retrocede al inicio de la palabra
+      if (from > 0 && !/\s/.test(fullText[from - 1] ?? " ")) {
+        const space = fullText.lastIndexOf(" ", from);
+        if (space !== -1 && space > from - 40) from = space + 1;
+      }
+      lastBoundaryRef.current = { index, charIndex: from };
+
+      const segments = splitSpeechSegments(fullText, from);
+      if (segments.length === 0) {
         // Nada por leer desde esa posición: pasa al siguiente fragmento
         if (index + 1 < chunksRef.current.length) {
           playChunkRef.current?.(index + 1);
@@ -246,49 +242,64 @@ export default function Home() {
         }
         return;
       }
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "es-ES";
-      utterance.rate = Math.min(2, Math.max(0.5, speedRef.current));
-      utterance.pitch = 1;
 
-      const matched = pickSpanishVoice(voiceRef.current, voiceUriRef.current, !isOfflineRef.current);
-      if (matched) {
-        utterance.voice = matched;
-        utterance.lang = matched.lang;
-      }
+      let si = 0;
+      const speakNext = () => {
+        if (token !== playTokenRef.current) return;
+        if (si >= segments.length) {
+          // Fragmento completo: encadena el siguiente
+          stopResumeWatchdog();
+          consecutiveFailuresRef.current = 0;
+          setChunkFraction(0.999);
+          if (index + 1 < chunksRef.current.length) {
+            playChunkRef.current?.(index + 1);
+          } else {
+            finishPlaybackRef.current?.();
+          }
+          return;
+        }
+        const seg = segments[si];
+        const utterance = new SpeechSynthesisUtterance(seg.text);
+        utterance.lang = "es-ES";
+        // Velocidad vigente AL COMENZAR esta oración (cambio sin reiniciar)
+        utterance.rate = Math.min(2, Math.max(0.5, speedRef.current));
+        utterance.pitch = 1;
 
-      utterance.onstart = () => {
-        if (token === playTokenRef.current) setIsLoadingChunk(false);
-      };
-      utterance.onboundary = (event) => {
-        if (token !== playTokenRef.current) return;
-        const pos = startChar + (event.charIndex || 0);
-        lastBoundaryRef.current = { index, charIndex: pos };
-        if (fullText.length > 0) {
-          setChunkFraction(Math.min(0.999, pos / fullText.length));
+        const matched = pickSpanishVoice(voiceRef.current, !isOfflineRef.current);
+        if (matched) {
+          utterance.voice = matched;
+          utterance.lang = matched.lang;
         }
-      };
-      utterance.onend = () => {
-        if (token !== playTokenRef.current) return;
-        stopResumeWatchdog();
-        consecutiveFailuresRef.current = 0;
-        setChunkFraction(0.999);
-        if (index + 1 < chunksRef.current.length) {
-          playChunkRef.current?.(index + 1);
-        } else {
-          finishPlaybackRef.current?.();
-        }
-      };
-      utterance.onerror = (event) => {
-        if (token !== playTokenRef.current) return;
-        const errorType = (event as SpeechSynthesisErrorEvent).error;
-        if (errorType === "interrupted" || errorType === "canceled") return;
-        stopResumeWatchdog();
-        handleChunkFailureRef.current?.(index, "La voz del navegador falló al leer el fragmento");
+
+        utterance.onstart = () => {
+          if (token === playTokenRef.current) setIsLoadingChunk(false);
+        };
+        utterance.onboundary = (event) => {
+          if (token !== playTokenRef.current) return;
+          const pos = seg.offset + (event.charIndex || 0);
+          lastBoundaryRef.current = { index, charIndex: pos };
+          if (fullText.length > 0) {
+            setChunkFraction(Math.min(0.999, pos / fullText.length));
+          }
+        };
+        utterance.onend = () => {
+          if (token !== playTokenRef.current) return;
+          si += 1;
+          speakNext();
+        };
+        utterance.onerror = (event) => {
+          if (token !== playTokenRef.current) return;
+          const errorType = (event as SpeechSynthesisErrorEvent).error;
+          if (errorType === "interrupted" || errorType === "canceled") return;
+          stopResumeWatchdog();
+          handleChunkFailureRef.current?.(index, "La voz del navegador falló al leer el fragmento");
+        };
+
+        synth.speak(utterance);
       };
 
       synth.cancel();
-      synth.speak(utterance);
+      speakNext();
       startResumeWatchdog();
     },
     [startResumeWatchdog, stopResumeWatchdog]
@@ -400,7 +411,7 @@ export default function Home() {
       setState("stopped");
       setIsLoadingChunk(false);
       consecutiveFailuresRef.current = 0;
-      pendingRespeakRef.current = false;
+      pendingRestartRef.current = false;
       lastBoundaryRef.current = { index: 0, charIndex: 0 };
     },
     [getAudio, stopResumeWatchdog]
@@ -461,9 +472,11 @@ export default function Home() {
   const handleChunkFailureRef = useRef<(index: number, message: string) => void>(() => {});
   handleChunkFailureRef.current = handleChunkFailure;
 
-  /** Reproduce un fragmento y encadena el siguiente al terminar */
+  /** Reproduce un fragmento y encadena el siguiente al terminar.
+   *  startFraction (0–1) permite empezar a mitad del audio del fragmento
+   *  (salto con la barra de progreso). */
   const playChunk = useCallback(
-    async (index: number) => {
+    async (index: number, startFraction = 0) => {
       const list = chunksRef.current;
       if (index < 0 || index >= list.length) {
         finishPlaybackRef.current?.();
@@ -472,13 +485,17 @@ export default function Home() {
       const token = ++playTokenRef.current;
       currentChunkRef.current = index;
       setCurrentChunk(index);
-      setChunkFraction(0);
+      setChunkFraction(startFraction > 0 ? Math.min(0.999, startFraction) : 0);
       setState("playing");
 
       // Motor del navegador: sin generación previa
       if (engineRef.current === "browser") {
         lastBoundaryRef.current = { index, charIndex: 0 };
-        speakChunkBrowser(index, token);
+        speakChunkBrowser(
+          index,
+          token,
+          startFraction > 0 ? Math.floor(startFraction * (list[index]?.text.length ?? 0)) : 0
+        );
         return;
       }
 
@@ -493,6 +510,20 @@ export default function Home() {
         audio.src = url;
         // La velocidad se aplica en vivo con playbackRate (el audio se genera a 1x)
         applyAudioRate(speedRef.current);
+        // Salto a mitad del fragmento (barra de progreso)
+        if (startFraction > 0.001 && startFraction < 0.999) {
+          const seekInside = () => {
+            try {
+              if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                audio.currentTime = startFraction * audio.duration;
+              }
+            } catch {
+              // algunos navegadores no permiten seek: se escucha desde el inicio
+            }
+          };
+          if (audio.readyState >= 1) seekInside();
+          else audio.addEventListener("loadedmetadata", seekInside, { once: true });
+        }
         audio.ontimeupdate = () => {
           if (token !== playTokenRef.current) return;
           if (audio.duration > 0) {
@@ -544,7 +575,7 @@ export default function Home() {
     [applyAudioRate, finishPlaybackRef, getAudio, getChunkAudioUrl, handleChunkFailureRef, isNoProviderError, speakChunkBrowser]
   );
 
-  const playChunkRef = useRef<(index: number) => void>(() => {});
+  const playChunkRef = useRef<(index: number, startFraction?: number) => void>(() => {});
   playChunkRef.current = playChunk;
 
   // ---------- Acciones del usuario ----------
@@ -567,9 +598,10 @@ export default function Home() {
       return;
     }
     if (state === "paused" && engineRef.current === "browser") {
-      // Si se cambió la velocidad en pausa, relee desde la palabra actual con la nueva velocidad
-      if (pendingRespeakRef.current) {
-        pendingRespeakRef.current = false;
+      const synth = window.speechSynthesis;
+      // Si se cambió la voz en pausa, retoma desde la palabra actual con la voz nueva
+      if (pendingRestartRef.current || !synth?.speaking) {
+        pendingRestartRef.current = false;
         const { index, charIndex } = lastBoundaryRef.current;
         const token = ++playTokenRef.current;
         setState("playing");
@@ -577,7 +609,7 @@ export default function Home() {
         speakChunkBrowser(index, token, charIndex);
         return;
       }
-      window.speechSynthesis?.resume();
+      synth?.resume();
       setState("playing");
       startResumeWatchdog();
       return;
@@ -617,8 +649,9 @@ export default function Home() {
     playChunkRef.current?.(target);
   }, [unlockAudio]);
 
-  /** Relee el fragmento actual desde la palabra en curso (motor navegador,
-   *  para cambiar voz o velocidad sin volver al inicio del fragmento) */
+  /** Relee el fragmento actual desde la palabra en curso (motor navegador).
+   *  Se usa SOLO al cambiar de voz: hay que reiniciar la oración para que
+   *  suene la voz nueva. La velocidad NO pasa por acá (nunca reinicia). */
   const respeakFromCurrentWord = useCallback(() => {
     const { index, charIndex } = lastBoundaryRef.current;
     if (index !== currentChunkRef.current) {
@@ -637,7 +670,7 @@ export default function Home() {
       engineRef.current = e;
       if (e === "browser") {
         clearCache();
-        pendingRespeakRef.current = false;
+        pendingRestartRef.current = false;
         lastBoundaryRef.current = { index: currentChunkRef.current, charIndex: 0 };
       }
       if (stateRef.current === "playing" || stateRef.current === "paused") {
@@ -647,67 +680,87 @@ export default function Home() {
     [clearCache]
   );
 
-  /** Cambio de voz (género): retoma desde la palabra actual (navegador) o reinicia el fragmento (servidor) */
+  /** Cambio de voz (género): EXACTAMENTE una voz por género. Retoma desde la
+   *  palabra actual (navegador) o reinicia el fragmento (servidor). */
   const handleVoiceChange = useCallback(
     (v: VoiceGender) => {
       if (v === voiceRef.current) return;
       setVoice(v);
       voiceRef.current = v;
-      setVoiceUri(null);
-      voiceUriRef.current = null;
       if (engineRef.current === "server") clearCache();
-      if (stateRef.current === "playing" || stateRef.current === "paused") {
-        if (engineRef.current === "browser" && stateRef.current === "playing") {
+      if (stateRef.current === "playing") {
+        if (engineRef.current === "browser") {
           respeakFromCurrentWord();
         } else {
           playChunkRef.current?.(currentChunkRef.current);
         }
+      } else if (stateRef.current === "paused" && engineRef.current === "browser") {
+        // En pausa: cancela y marca para retomar desde la palabra actual con la voz nueva
+        window.speechSynthesis?.cancel();
+        pendingRestartRef.current = true;
       }
     },
     [clearCache, respeakFromCurrentWord]
   );
 
-  /** Cambio de voz concreta del dispositivo: retoma desde la palabra actual */
-  const handleVoiceUriChange = useCallback(
-    (uri: string) => {
-      const next = uri === "" ? null : uri;
-      setVoiceUri(next);
-      voiceUriRef.current = next;
-      if (stateRef.current === "playing" && engineRef.current === "browser") {
-        respeakFromCurrentWord();
+  /** Salto de posición con la barra de audio (0–100). Solo el usuario mueve
+   *  la posición de lectura; se retoma exactamente desde ese punto. */
+  const handleSeek = useCallback(
+    (percent: number) => {
+      const list = chunksRef.current;
+      if (list.length === 0) return;
+      const totalChars = list.reduce((acc, c) => acc + c.text.length, 0);
+      if (totalChars === 0) return;
+
+      let target = Math.round((Math.min(100, Math.max(0, percent)) / 100) * totalChars);
+      target = Math.min(target, totalChars - 1);
+      let idx = 0;
+      while (idx < list.length - 1 && target >= list[idx].text.length) {
+        target -= list[idx].text.length;
+        idx += 1;
+      }
+      const len = list[idx].text.length || 1;
+      const fraction = target / len;
+
+      if (stateRef.current === "stopped") {
+        // Detenido: la barra elige el fragmento desde el que comenzará
+        currentChunkRef.current = idx;
+        setCurrentChunk(idx);
+        setChunkFraction(0);
         return;
       }
-      if (stateRef.current === "playing" || stateRef.current === "paused") {
-        playChunkRef.current?.(currentChunkRef.current);
+
+      unlockAudio();
+      if (engineRef.current === "server") {
+        playChunkRef.current?.(idx, fraction);
+        return;
       }
+      // Motor navegador: retoma desde ese carácter con la velocidad actual
+      const token = ++playTokenRef.current;
+      setState("playing");
+      startResumeWatchdog();
+      speakChunkBrowser(idx, token, Math.floor(fraction * len));
     },
-    [respeakFromCurrentWord]
+    [speakChunkBrowser, startResumeWatchdog, unlockAudio]
   );
 
-  /** Cambio de velocidad SIN reiniciar la lectura:
-   *  - Motor servidor: se aplica al instante con audio.playbackRate (mismo audio, misma posición).
-   *  - Motor navegador: relee desde la palabra actual con la nueva velocidad.
-   *  - En pausa: se recuerda y se aplica al reanudar. */
+  /** Cambio de velocidad SIN reiniciar la lectura, JAMÁS:
+   *  - Motor servidor: playbackRate en vivo sobre el audio actual — instantáneo,
+   *    la lectura sigue exactamente por el mismo punto.
+   *  - Motor navegador: la oración actual termina a la velocidad anterior y la
+   *    siguiente se habla ya con la nueva — sin cortes, saltos ni repeticiones.
+   *  La posición de lectura SOLO la cambia el usuario (barra o botones). */
   const handleSpeedChange = useCallback(
     (s: number) => {
       setSpeed(s);
       speedRef.current = s;
-      if (speedTimerRef.current) clearTimeout(speedTimerRef.current);
-      speedTimerRef.current = setTimeout(() => {
-        if (engineRef.current === "server") {
-          // Cambio en vivo: el audio sigue exactamente donde iba, solo más rápido o más lento
-          applyAudioRate(s);
-          return;
-        }
-        // Motor navegador
-        if (stateRef.current === "playing") {
-          respeakFromCurrentWord();
-        } else if (stateRef.current === "paused") {
-          pendingRespeakRef.current = true;
-        }
-      }, 250);
+      if (engineRef.current === "server") {
+        applyAudioRate(s);
+      }
+      // Motor navegador: nada que hacer — las oraciones se crean al vuelo y
+      // toman speedRef.current vigente al empezar cada una.
     },
-    [applyAudioRate, respeakFromCurrentWord]
+    [applyAudioRate]
   );
 
   // ---------- Carga y análisis del documento ----------
@@ -777,9 +830,9 @@ export default function Home() {
   const phase = !docInfo && !isParsing ? 1 : isParsing ? 2 : 3;
 
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-b from-emerald-50/60 via-white to-white">
+    <div className="flex min-h-screen flex-col bg-gradient-to-b from-emerald-50/60 via-white to-white dark:from-emerald-950/30 dark:via-zinc-950 dark:to-zinc-950">
       {/* Encabezado */}
-      <header className="sticky top-0 z-30 border-b border-zinc-200/80 bg-white/85 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-zinc-200/80 bg-white/85 backdrop-blur dark:border-zinc-800/80 dark:bg-zinc-950/85">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
             {/* Logo propio de LectorVoz */}
@@ -800,6 +853,7 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <ThemeToggle />
             <OfflineBadge />
             <InstallButton />
             {docInfo && (
@@ -839,7 +893,7 @@ export default function Home() {
         {docInfo && (
           <div className="space-y-4">
             {/* Tarjeta del documento analizado */}
-            <Card className="border-zinc-200 shadow-sm">
+            <Card className="border-zinc-200 shadow-sm dark:border-zinc-800">
               <CardContent className="p-4 sm:p-5">
                 <div className="mb-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -868,8 +922,9 @@ export default function Home() {
                 </div>
 
                 {docInfo.truncated && (
-                  <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    El documento es muy extenso y se leerán las primeras ~50.000 palabras.
+                  <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                    El documento es muy extenso: se leerán las primeras{" "}
+                    {docInfo.words.toLocaleString("es")} palabras ({docInfo.chars.toLocaleString("es")} caracteres).
                   </p>
                 )}
               </CardContent>
@@ -882,9 +937,6 @@ export default function Home() {
                 onEngineChange={handleEngineChange}
                 voice={voice}
                 onVoiceChange={handleVoiceChange}
-                voices={voiceOptions}
-                selectedUri={voiceUri}
-                onVoiceUriChange={handleVoiceUriChange}
                 offline={isOffline}
                 speed={speed}
                 onSpeedChange={handleSpeedChange}
@@ -923,7 +975,7 @@ export default function Home() {
             </Button>
 
             {/* Texto sincronizado */}
-            <Card className="border-zinc-200 shadow-sm">
+            <Card className="border-zinc-200 shadow-sm dark:border-zinc-800">
               <CardContent className="p-4 sm:p-5">
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -934,7 +986,7 @@ export default function Home() {
                     {totalChunks} fragmentos de audio
                   </span>
                 </div>
-                <div className="max-h-[45vh] space-y-2 overflow-y-auto rounded-lg bg-zinc-50/70 p-3">
+                <div className="max-h-[45vh] space-y-2 overflow-y-auto rounded-lg bg-zinc-50/70 p-3 dark:bg-zinc-900/50">
                   {chunks.map((chunk) => {
                     const isActive = chunk.index === currentChunk && state !== "stopped";
                     const isPast = chunk.index < currentChunk;
@@ -949,12 +1001,12 @@ export default function Home() {
                           }
                         }}
                         className={cn(
-                          "rounded-lg p-3 text-[15px] leading-relaxed transition-colors",
+                          "rounded-lg p-3 text-[15px] leading-relaxed transition-colors [content-visibility:auto] [contain-intrinsic-size:auto 96px]",
                           isActive &&
-                            "border-l-4 border-emerald-500 bg-emerald-100/80 font-medium text-emerald-950",
-                          isPast && "text-zinc-400",
-                          !isActive && !isPast && "text-zinc-700",
-                          state !== "stopped" && "cursor-pointer hover:bg-zinc-200/60"
+                            "border-l-4 border-emerald-500 bg-emerald-100/80 font-medium text-emerald-950 dark:bg-emerald-500/15 dark:text-emerald-200",
+                          isPast && "text-zinc-400 dark:text-zinc-500",
+                          !isActive && !isPast && "text-zinc-700 dark:text-zinc-300",
+                          state !== "stopped" && "cursor-pointer hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60"
                         )}
                       >
                         {chunk.text}
@@ -969,7 +1021,7 @@ export default function Home() {
       </main>
 
       {/* Pie */}
-      <footer className="border-t border-zinc-200 py-6 text-center text-xs text-muted-foreground">
+      <footer className="border-t border-zinc-200 py-6 text-center text-xs text-muted-foreground dark:border-zinc-800">
         LectorVoz · Convierte cualquier documento en un audiolibro para tus caminatas
       </footer>
 
@@ -988,6 +1040,7 @@ export default function Home() {
           onPrev={handlePrev}
           onNext={handleNext}
           onOpenWalkingMode={() => setWalkingOpen(true)}
+          onSeek={handleSeek}
         />
       )}
 
@@ -1005,6 +1058,7 @@ export default function Home() {
         onStop={handleStop}
         onPrev={handlePrev}
         onNext={handleNext}
+        onSeek={handleSeek}
       />
     </div>
   );
@@ -1028,8 +1082,8 @@ function Step({
       className={cn(
         "flex items-center gap-1.5 rounded-full px-2.5 py-1.5 font-medium transition-colors sm:px-3",
         active && "bg-emerald-600 text-white shadow-sm",
-        done && "bg-emerald-100 text-emerald-700",
-        !active && !done && "bg-zinc-100 text-zinc-500"
+        done && "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+        !active && !done && "bg-zinc-100 text-zinc-500 dark:bg-zinc-800/80 dark:text-zinc-400"
       )}
     >
       <span
@@ -1037,7 +1091,7 @@ function Step({
           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
           active && "bg-white/25 text-white",
           done && "bg-emerald-600 text-white",
-          !active && !done && "bg-zinc-300 text-zinc-600"
+          !active && !done && "bg-zinc-300 text-zinc-600 dark:bg-zinc-600 dark:text-zinc-200"
         )}
       >
         {n}
@@ -1056,7 +1110,7 @@ function StepConnector({ done }: { done: boolean }) {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-zinc-50 p-3 text-center">
+    <div className="rounded-xl bg-zinc-50 p-3 text-center dark:bg-zinc-800/60">
       <p className="text-lg font-bold tabular-nums text-foreground">{value}</p>
       <p className="text-[11px] leading-tight text-muted-foreground">{label}</p>
     </div>

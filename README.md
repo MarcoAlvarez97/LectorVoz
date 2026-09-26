@@ -13,10 +13,12 @@ cocinas o viajas.
 
 | Función | Detalle |
 |---|---|
-| 📄 Análisis de documentos | **En el navegador** (offline): PDF con `pdfjs-dist`, Word con `mammoth`, texto plano nativo. Sin servidores, sin subir tu archivo a nadie. |
-| 🔊 Lectura por voz | **Web Speech API** con las voces en español instaladas en tu dispositivo (gratis, offline). Motor **HD opcional** vía OpenAI si configuras `OPENAI_API_KEY`. |
-| 👩 voz de mujer / 👨 voz de hombre | Selección por género + lista de todas las voces españolas del dispositivo. Con internet prioriza las voces **naturales** (Edge «Natural», Google); sin conexión usa las locales. |
-| ⏩ Velocidad | 0.5x – 2x y el cambio **se aplica al instante**: la lectura sigue por donde va, sin reiniciar ni volver al comienzo. |
+| 📄 Análisis de documentos | **En el navegador** (offline): PDF con `pdfjs-dist`, Word con `mammoth`, texto plano nativo. Sin servidores, sin subir tu archivo a nadie. **Hasta 200 MB** y ~320.000 palabras por documento. |
+| 🔊 Lectura por voz | **Web Speech API** con la mejor voz en español de tu dispositivo (gratis, offline). Motor **HD opcional** vía OpenAI si configuras `OPENAI_API_KEY`. |
+| 👩 voz de mujer / 👨 voz de hombre | **Exactamente una voz por género**: elegís mujer u hombre y la app toma automáticamente la mejor voz en español disponible (con internet prioriza las voces «naturales» de Edge/Google; sin conexión usa las instaladas). |
+| ⏩ Velocidad | 0.5x – 2x y el cambio **se aplica al instante y JAMÁS reinicia la lectura**: sigue exactamente por donde va, solo acelera o frena. La posición solo la cambia el usuario. |
+| 🎚️ Barra de audio deslizable | Arrastrá la barra para **volver o saltar a cualquier parte** del documento (retoma exactamente en ese punto) + botones de fragmento anterior/siguiente, también en el modo caminata. |
+| 🌗 Modo claro / oscuro | Botón en el encabezado; respeta la preferencia del sistema en la primera visita y guarda tu elección. |
 | 🚶 Modo caminata | Pantalla completa con texto gigante y controles grandes. |
 | 📱 **PWA instalable** | Instálala como app en Android, iPhone, Windows o macOS. Incluye logo propio, pantalla standalone y acceso desde el escritorio. |
 | 🌐 **Modo offline** | Service worker que guarda la app completa: abre, analiza y escucha documentos sin internet. |
@@ -164,8 +166,9 @@ lectorvoz/
 │   │   └── apple-icon.png     # Icono iOS
 │   ├── components/lector/
 │   │   ├── upload-zone.tsx    # Paso 1: arrastrar documento
-│   │   ├── voice-selector.tsx # Motor, género, voz del dispositivo y velocidad
-│   │   ├── player-bar.tsx     # Barra fija estilo Spotify
+│   │   ├── voice-selector.tsx # Motor, voz (1 por género) y velocidad
+│   │   ├── theme-toggle.tsx   # Modo claro / oscuro
+│   │   ├── player-bar.tsx     # Barra fija estilo Spotify con barra de audio deslizable
 │   │   ├── walking-mode.tsx   # Modo caminata a pantalla completa
 │   │   └── pwa.tsx            # Instalar app + indicador offline + SW registrar
 │   └── lib/
@@ -182,7 +185,9 @@ lectorvoz/
 
 | Problema | Solución |
 |---|---|
-| «No se detectaron voces en español» | Instala un paquete de voz español (ver arriba) y recarga. En Chrome/Edge casi siempre hay voces disponibles. |
+| «No se detectaron voces en español» | Instala un paquete de voz español y recarga. En Chrome/Edge casi siempre hay voces disponibles. La app elige sola la mejor voz del género elegido. |
+| Cambié la velocidad y no se nota aún | En el motor «navegador» la nueva velocidad entra con la **siguiente oración** (la actual termina a la velocidad anterior, sin cortes). En el motor HD es instantáneo. |
+| Arrastré la barra y saltó a otro lado | Es el salto de posición: suelta la barra y la lectura retoma exactamente desde ese punto del documento. |
 | La voz HD dice «El servidor no tiene un proveedor de voz» | Falta `OPENAI_API_KEY` (ver la sección de arriba). La app pasa sola a la voz gratuita del navegador. |
 | La voz HD da error HTTP 401 | La clave es inválida o no tiene crédito. Revisa *Billing* en platform.openai.com. |
 | «El documento no contiene texto legible» | El PDF está escaneado como imagen (sin capa de texto). Usa un PDF con texto real. |

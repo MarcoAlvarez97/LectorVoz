@@ -92,7 +92,7 @@ export function InstallButton({ className }: { className?: string }) {
         size="sm"
         onClick={handleInstall}
         aria-label="Instalar app en el celular"
-        className="min-h-[40px] rounded-full border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:text-emerald-800"
+        className="min-h-[40px] rounded-full border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/20 dark:hover:text-emerald-200"
       >
         {promptEvent ? <Download className="h-4 w-4" /> : <Smartphone className="h-4 w-4" />}
         <span className="hidden sm:inline">
@@ -103,7 +103,7 @@ export function InstallButton({ className }: { className?: string }) {
       {showIosTip && !promptEvent && (
         <div
           role="note"
-          className="absolute right-0 top-12 z-50 w-64 rounded-xl border border-zinc-200 bg-white p-3 text-xs leading-relaxed text-zinc-700 shadow-lg"
+          className="absolute right-0 top-12 z-50 w-64 rounded-xl border border-zinc-200 bg-white p-3 text-xs leading-relaxed text-zinc-700 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
         >
           <p className="mb-1 font-semibold text-foreground">Instalar en iPhone/iPad</p>
           <ol className="list-decimal space-y-0.5 pl-4">
@@ -143,7 +143,7 @@ export function OfflineBadge() {
   return (
     <span
       role="status"
-      className="flex min-h-[40px] items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800"
+      className="flex min-h-[40px] items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
     >
       <WifiOff className="h-3.5 w-3.5" />
       <span className="hidden sm:inline">Sin conexión · modo offline activo</span>

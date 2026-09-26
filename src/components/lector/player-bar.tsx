@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { Forward, Maximize2, Pause, Play, Rewind, Square, Loader2 } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { VoiceGender } from "./voice-selector";
@@ -21,8 +22,15 @@ interface PlayerBarProps {
   onPrev: () => void;
   onNext: () => void;
   onOpenWalkingMode: () => void;
+  /** Salta a una posición del documento (0–100). Solo se dispara al soltar la barra. */
+  onSeek: (percent: number) => void;
 }
 
+/**
+ * Barra de reproducción fija estilo reproductor de audio:
+ * - Barra deslizable para volver o saltar a cualquier punto del documento.
+ * - Botones de fragmento anterior / siguiente.
+ */
 export function PlayerBar({
   state,
   currentChunk,
@@ -36,7 +44,12 @@ export function PlayerBar({
   onPrev,
   onNext,
   onOpenWalkingMode,
+  onSeek,
 }: PlayerBarProps) {
+  // Mientras se arrastra la barra se muestra el valor local; al soltar salta
+  const [scrub, setScrub] = useState<number | null>(null);
+  const display = scrub ?? progressPercent;
+
   const statusText =
     isLoadingChunk && state === "playing"
       ? "Generando audio…"
@@ -47,21 +60,33 @@ export function PlayerBar({
           : "Listo";
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-200 bg-white/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_20px_rgba(0,0,0,0.08)] backdrop-blur">
+    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-200 bg-white/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_20px_rgba(0,0,0,0.08)] backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95">
       <div className="mx-auto max-w-3xl px-4 py-3">
-        {/* Progreso */}
-        <div className="mb-2.5 flex items-center gap-3">
+        {/* Barra de progreso deslizable (seek) */}
+        <div className="mb-1 flex items-center gap-3">
           <span className="w-20 shrink-0 text-xs font-medium tabular-nums text-muted-foreground">
             {Math.min(currentChunk + 1, totalChunks)}/{totalChunks}
           </span>
-          <Progress
-            value={progressPercent}
-            className="h-2 flex-1 [&_[data-slot=progress-indicator]]:bg-emerald-500"
+          <Slider
+            value={[Math.min(100, Math.max(0, display))]}
+            min={0}
+            max={100}
+            step={0.1}
+            aria-label="Barra de audio: arrastrá para volver o avanzar"
+            onValueChange={(values) => setScrub(values[0])}
+            onValueCommit={(values) => {
+              setScrub(null);
+              onSeek(values[0]);
+            }}
+            className="flex-1 [&_[data-slot=slider-track]]:bg-zinc-200 dark:[&_[data-slot=slider-track]]:bg-zinc-800 [&_[data-slot=slider-range]]:bg-emerald-500 [&_[data-slot=slider-thumb]]:size-3.5 [&_[data-slot=slider-thumb]]:border-emerald-600"
           />
           <span className="w-12 shrink-0 text-right text-xs font-medium tabular-nums text-muted-foreground">
-            {Math.round(progressPercent)}%
+            {Math.round(display)}%
           </span>
         </div>
+        <p className="mb-2 text-center text-[11px] text-muted-foreground sm:hidden">
+          Arrastrá la barra para volver o saltar de parte
+        </p>
 
         {/* Controles */}
         <div className="flex items-center justify-between gap-2">
@@ -80,7 +105,7 @@ export function PlayerBar({
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <ControlButton onClick={onPrev} label="Fragmento anterior" disabled={currentChunk <= 0}>
+            <ControlButton onClick={onPrev} label="Volver un fragmento" disabled={currentChunk <= 0}>
               <Rewind className="h-5 w-5" />
             </ControlButton>
 
@@ -111,7 +136,7 @@ export function PlayerBar({
 
             <ControlButton
               onClick={onNext}
-              label="Fragmento siguiente"
+              label="Avanzar un fragmento"
               disabled={currentChunk >= totalChunks - 1}
             >
               <Forward className="h-5 w-5" />
@@ -146,7 +171,7 @@ function ControlButton({
       disabled={disabled}
       aria-label={label}
       className={cn(
-        "h-11 w-11 rounded-full text-zinc-700 hover:bg-zinc-100 hover:text-foreground",
+        "h-11 w-11 rounded-full text-zinc-700 hover:bg-zinc-100 hover:text-foreground dark:text-zinc-300 dark:hover:bg-zinc-800",
         disabled && "opacity-40"
       )}
     >

@@ -61,8 +61,8 @@ export function UploadZone({ onFileSelected, isParsing }: UploadZoneProps) {
       className={cn(
         "group flex min-h-[320px] cursor-pointer flex-col items-center justify-center gap-5 rounded-2xl border-2 border-dashed bg-card p-8 text-center transition-all",
         isDragging
-          ? "border-emerald-500 bg-emerald-50/60 scale-[1.01]"
-          : "border-zinc-300 hover:border-emerald-400 hover:bg-emerald-50/30",
+          ? "border-emerald-500 bg-emerald-50/60 scale-[1.01] dark:bg-emerald-500/10"
+          : "border-zinc-300 hover:border-emerald-400 hover:bg-emerald-50/30 dark:border-zinc-700 dark:hover:border-emerald-500 dark:hover:bg-emerald-500/5",
         isParsing && "pointer-events-none opacity-80"
       )}
     >
@@ -79,7 +79,7 @@ export function UploadZone({ onFileSelected, isParsing }: UploadZoneProps) {
 
       {isParsing ? (
         <>
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100">
+          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-500/15">
             <Loader2 className="h-10 w-10 animate-spin text-emerald-600" />
           </div>
           <div className="space-y-1">
@@ -112,7 +112,7 @@ export function UploadZone({ onFileSelected, isParsing }: UploadZoneProps) {
             <Badge icon={<FileText className="h-3.5 w-3.5" />} label="MD" />
             <Badge icon={<FileText className="h-3.5 w-3.5" />} label="CSV" />
           </div>
-          <p className="text-xs text-muted-foreground">Máximo 20 MB</p>
+          <p className="text-xs text-muted-foreground">Máximo 200 MB</p>
         </>
       )}
     </div>
@@ -121,7 +121,7 @@ export function UploadZone({ onFileSelected, isParsing }: UploadZoneProps) {
 
 function Badge({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-600">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
       {icon}
       {label}
     </span>

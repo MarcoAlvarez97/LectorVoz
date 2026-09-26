@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { Forward, Pause, Play, Rewind, Square, Loader2, X } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import type { PlayerState } from "./player-bar";
 
@@ -18,6 +19,8 @@ interface WalkingModeProps {
   onStop: () => void;
   onPrev: () => void;
   onNext: () => void;
+  /** Salta a una posición del documento (0–100), al soltar la barra */
+  onSeek: (percent: number) => void;
 }
 
 export function WalkingMode({
@@ -33,7 +36,11 @@ export function WalkingMode({
   onStop,
   onPrev,
   onNext,
+  onSeek,
 }: WalkingModeProps) {
+  const [scrub, setScrub] = useState<number | null>(null);
+  const display = scrub ?? progressPercent;
+
   if (!open) return null;
 
   return (
@@ -64,10 +71,24 @@ export function WalkingMode({
         </button>
       </div>
 
-      <Progress
-        value={progressPercent}
-        className="mx-5 h-1.5 bg-zinc-800 [&_[data-slot=progress-indicator]]:bg-emerald-400"
-      />
+      <div className="mx-5 flex items-center gap-3">
+        <Slider
+          value={[Math.min(100, Math.max(0, display))]}
+          min={0}
+          max={100}
+          step={0.1}
+          aria-label="Barra de audio: arrastrá para volver o avanzar"
+          onValueChange={(values) => setScrub(values[0])}
+          onValueCommit={(values) => {
+            setScrub(null);
+            onSeek(values[0]);
+          }}
+          className="flex-1 [&_[data-slot=slider-track]]:bg-zinc-800 [&_[data-slot=slider-range]]:bg-emerald-400 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-emerald-400 [&_[data-slot=slider-thumb]]:bg-white"
+        />
+        <span className="w-12 shrink-0 text-right text-xs font-medium tabular-nums text-zinc-400">
+          {Math.round(display)}%
+        </span>
+      </div>
 
       {/* Texto actual en grande */}
       <div className="flex flex-1 items-center overflow-y-auto px-6 py-6">

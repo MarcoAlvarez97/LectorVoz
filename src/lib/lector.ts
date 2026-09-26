@@ -144,6 +144,55 @@ export function formatDuration(totalSeconds: number): string {
   return `${seconds} s`;
 }
 
+/** Segmento de habla: texto + offset absoluto dentro del fragmento original */
+export interface SpeechSegment {
+  offset: number;
+  text: string;
+}
+
+/**
+ * Divide el texto en segmentos del tamaño de una oración (con offset absoluto).
+ *
+ * Se usa para la lectura con la voz del navegador: cada segmento se sintetiza
+ * justo ANTES de hablarse, así un cambio de velocidad se aplica en la siguiente
+ * oración sin cortar, reiniciar ni repetir nada de la lectura en curso.
+ *
+ * Reglas de corte: tras puntuación fuerte (.!?…) si el bloque ya tiene ≥40
+ * caracteres; tras puntuación suave (,;:) si supera ~200; y corte forzado por
+ * palabra como último recurso. `from` permite empezar desde cualquier carácter
+ * (salto de la barra de progreso).
+ */
+export function splitSpeechSegments(
+  text: string,
+  from = 0,
+  maxLen = 240
+): SpeechSegment[] {
+  const segments: SpeechSegment[] = [];
+  let start = Math.min(Math.max(0, from), text.length);
+  let i = start;
+
+  while (i < text.length) {
+    const prevChar = text[i];
+    i += 1;
+    const len = i - start;
+    const nextChar = i < text.length ? text[i] : "";
+    const hardCut = ".!?…".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
+    const softCut = ",;:".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
+    const forced = (len >= maxLen && /\s/.test(nextChar)) || len > maxLen + 120;
+
+    if ((hardCut && len >= 40) || (softCut && len >= 200) || forced) {
+      const slice = text.slice(start, i);
+      if (slice.trim()) segments.push({ offset: start, text: slice.trim() });
+      while (i < text.length && /\s/.test(text[i])) i += 1;
+      start = i;
+    }
+  }
+
+  const tail = text.slice(start);
+  if (tail.trim()) segments.push({ offset: start, text: tail.trim() });
+  return segments;
+}
+
 /** Limpia texto extraído de documentos */
 export function cleanExtractedText(raw: string): string {
   return raw
