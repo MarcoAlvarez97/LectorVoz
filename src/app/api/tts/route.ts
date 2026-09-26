@@ -12,8 +12,13 @@ const MAX_CHUNK_LENGTH = 1024;
  * automáticamente la voz gratuita del navegador (Web Speech API).
  *
  * Para activar las voces neuronales HD, define la variable de entorno
- * OPENAI_API_KEY (en local: archivo .env ; en Vercel: Settings →
+ * OPENAI_API_KEY (en local: archivo .env.local ; en Vercel: Settings →
  * Environment Variables). No se necesita ningún paquete extra.
+ *
+ * Usa gpt-4o-mini-tts (calidad narrativa, similar a un audiolibro) con
+ * instrucciones en español, y hace fallback a tts-1 si la cuenta no lo
+ * tiene disponible. El audio se genera a velocidad 1: el cliente aplica
+ * la velocidad con playbackRate (cambio instantáneo sin reiniciar).
  */
 
 function clamp(n: number, min: number, max: number): number {
@@ -54,23 +59,45 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // OpenAI TTS: voces femeninas (nova/coral/shimmer) y masculinas (onyx/echo/ash)
-    const openaiVoice = gender === "male" ? "onyx" : "nova";
+    // OpenAI TTS: voces femeninas cálidas (coral/nova/shimmer) y masculinas (onyx/echo/ash)
+    const openaiVoice = gender === "male" ? "onyx" : "coral";
+    const instructions =
+      gender === "male"
+        ? "Lee en español con voz de narrador clara y profesional, ritmo pausado, buena entonación y dicción perfecta, como un audiolibro."
+        : "Lee en español con voz cálida y cercana, como una narradora de audiolibros, con entonación natural y agradable.";
 
-    const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "tts-1",
-        input: text,
-        voice: openaiVoice,
-        speed: clamp(speed, 0.25, 4),
-        response_format: "mp3",
-      }),
-    });
+    const callProvider = (model: string) =>
+      fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(
+          model === "gpt-4o-mini-tts"
+            ? {
+                model,
+                input: text,
+                voice: openaiVoice,
+                instructions,
+                speed: clamp(speed, 0.25, 4),
+                response_format: "mp3",
+              }
+            : {
+                model,
+                input: text,
+                voice: openaiVoice,
+                speed: clamp(speed, 0.25, 4),
+                response_format: "mp3",
+              }
+        ),
+      });
+
+    // Modelo narrativo nuevo; si la cuenta no lo soporta, se usa el clásico tts-1
+    let upstream = await callProvider("gpt-4o-mini-tts");
+    if (!upstream.ok && (upstream.status === 400 || upstream.status === 404)) {
+      upstream = await callProvider("tts-1");
+    }
 
     if (!upstream.ok || !upstream.body) {
       const detail = await upstream.text().catch(() => "");

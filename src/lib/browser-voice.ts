@@ -3,8 +3,10 @@
  *
  * Cada dispositivo ofrece voces distintas (Chrome, Edge, Windows, macOS,
  * Android, iOS…). Elegimos la mejor coincidencia según el género usando
- * listas de nombres conocidos, dando PRIORIDAD a las voces locales
- * (voice.localService) porque funcionan SIN CONEXIÓN.
+ * listas de nombres conocidos:
+ *  - Con internet → priorizamos voces neuronales/naturales (Edge "Natural",
+ *    Google…), que suenan mucho más humanas.
+ *  - Sin conexión → priorizamos voces locales (voice.localService).
  */
 
 export interface VoiceOption {
@@ -13,6 +15,8 @@ export interface VoiceOption {
   name: string;
   /** true si la voz está instalada en el dispositivo → funciona offline */
   local: boolean;
+  /** true si es una voz neuronal/natural (suena mucho mejor; algunas requieren internet) */
+  natural: boolean;
   lang: string;
   gender: "female" | "male" | "unknown";
 }
@@ -61,6 +65,9 @@ const FEMALE_HINTS = [
   "angélica",
   "angelica",
   "soledad",
+  "xóchitl",
+  "xochitl",
+  "trinidad",
   "google español", // voz por defecto de Android/Chrome (femenina)
 ];
 
@@ -93,7 +100,18 @@ const MALE_HINTS = [
   "teo",
   "saúl",
   "saul",
+  "liberto",
+  "nil",
+  "salomón",
+  "salomon",
+  "thiago",
+  "yago",
 ];
+
+/** Detecta voces neuronales de alta calidad (Edge "Natural", Google, neural…) */
+function isNaturalVoice(name: string): boolean {
+  return /natural|google|neural|neuronal|online/i.test(name);
+}
 
 /** Clasifica el género probable de una voz por su nombre */
 function classifyGender(name: string): "female" | "male" | "unknown" {
@@ -121,11 +139,13 @@ export function getSpanishVoiceOptions(): VoiceOption[] {
       uri: v.voiceURI,
       name: v.name,
       local: v.localService,
+      natural: isNaturalVoice(v.name),
       lang: v.lang,
       gender: classifyGender(v.name),
     }))
     .sort((a, b) => {
       if (a.local !== b.local) return a.local ? -1 : 1;
+      if (a.natural !== b.natural) return a.natural ? -1 : 1;
       const ga = a.gender === "unknown" ? 1 : 0;
       const gb = b.gender === "unknown" ? 1 : 0;
       if (ga !== gb) return ga - gb;
@@ -135,11 +155,15 @@ export function getSpanishVoiceOptions(): VoiceOption[] {
 
 /**
  * Elige la mejor voz en español según el género (y una voz preferida opcional).
- * Prioriza voces locales (offline) y coincidencias de nombre conocidas.
+ *
+ * Con internet: prioriza las voces neuronales/naturales del género pedido
+ * (Edge "Natural", Google…), que suenan mucho mejor que las clásicas.
+ * Sin conexión: prioriza voces locales (offline) del género pedido.
  */
 export function pickSpanishVoice(
   gender: "female" | "male",
-  preferredUri?: string | null
+  preferredUri?: string | null,
+  online = true
 ): SpeechSynthesisVoice | null {
   const voices = getSpanishVoices();
   if (voices.length === 0) return null;
@@ -150,22 +174,35 @@ export function pickSpanishVoice(
   }
 
   const hints = gender === "female" ? FEMALE_HINTS : MALE_HINTS;
+  const matchesGender = (v: SpeechSynthesisVoice) =>
+    hints.some((h) => v.name.toLowerCase().includes(h));
+  const isNatural = (v: SpeechSynthesisVoice) => isNaturalVoice(v.name);
 
-  // 1) Voz local con nombre conocido del género pedido
-  for (const voice of voices) {
-    const name = voice.name.toLowerCase();
-    if (voice.localService && hints.some((h) => name.includes(h))) return voice;
+  // Con internet: 1ª) natural del género pedido — calidad máxima
+  if (online) {
+    for (const voice of voices) {
+      if (matchesGender(voice) && isNatural(voice)) return voice;
+    }
   }
-  // 2) Cualquier voz con nombre conocido del género pedido
+  // 2) Voz local con nombre conocido del género pedido
   for (const voice of voices) {
-    const name = voice.name.toLowerCase();
-    if (hints.some((h) => name.includes(h))) return voice;
+    if (voice.localService && matchesGender(voice)) return voice;
   }
-  // 3) Primera voz local en español, si existe
+  // 3) Cualquier voz con nombre conocido del género pedido
+  for (const voice of voices) {
+    if (matchesGender(voice)) return voice;
+  }
+  // 4) Natural aunque el género sea desconocido (si hay internet)
+  if (online) {
+    for (const voice of voices) {
+      if (isNatural(voice)) return voice;
+    }
+  }
+  // 5) Primera voz local en español, si existe
   const local = voices.find((v) => v.localService);
   if (local) return local;
 
-  // 4) Primera voz en español disponible
+  // 6) Primera voz en español disponible
   return voices[0];
 }
 

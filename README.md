@@ -15,8 +15,8 @@ cocinas o viajas.
 |---|---|
 | 📄 Análisis de documentos | **En el navegador** (offline): PDF con `pdfjs-dist`, Word con `mammoth`, texto plano nativo. Sin servidores, sin subir tu archivo a nadie. |
 | 🔊 Lectura por voz | **Web Speech API** con las voces en español instaladas en tu dispositivo (gratis, offline). Motor **HD opcional** vía OpenAI si configuras `OPENAI_API_KEY`. |
-| 👩 voz de mujer / 👨 voz de hombre | Selección por género + lista de todas las voces españolas del dispositivo, marcadas con «sin conexión» cuando son locales. |
-| ⏩ Velocidad | 0.5x – 2x con reanudación instantánea del fragmento actual. |
+| 👩 voz de mujer / 👨 voz de hombre | Selección por género + lista de todas las voces españolas del dispositivo. Con internet prioriza las voces **naturales** (Edge «Natural», Google); sin conexión usa las locales. |
+| ⏩ Velocidad | 0.5x – 2x y el cambio **se aplica al instante**: la lectura sigue por donde va, sin reiniciar ni volver al comienzo. |
 | 🚶 Modo caminata | Pantalla completa con texto gigante y controles grandes. |
 | 📱 **PWA instalable** | Instálala como app en Android, iPhone, Windows o macOS. Incluye logo propio, pantalla standalone y acceso desde el escritorio. |
 | 🌐 **Modo offline** | Service worker que guarda la app completa: abre, analiza y escucha documentos sin internet. |
@@ -35,7 +35,7 @@ cocinas o viajas.
 
 ```bash
 # 1. Descomprime el ZIP y entra a la carpeta
-cd lectorvoz-vercel
+cd lectorvoz
 
 # 2. Instala dependencias
 npm install
@@ -86,6 +86,42 @@ navegador. Si quieres voces neuronales HD (opcionales, requieren internet):
 
 ---
 
+## ¿Qué es OPENAI_API_KEY? (voz HD, opcional)
+
+`OPENAI_API_KEY` es una **clave privada de la plataforma de OpenAI** que le da a tu
+servidor permiso para usar sus voces neuronales TTS. Con ella, el motor
+**«Voz HD (servidor)»** genera audio con calidad de audiolibro (modelo
+`gpt-4o-mini-tts`, voz femenina *coral* y masculina *onyx*, con instrucciones de
+narración en español). Es **totalmente opcional**: sin la clave, la app usa las
+voces de tu dispositivo, que son gratis y funcionan offline.
+
+### Cómo conseguirla (5 minutos)
+
+1. Crea una cuenta en [platform.openai.com](https://platform.openai.com) y
+   añade un método de pago (menú *Billing* → mínimo recomendado US$5).
+2. Ve a *API keys* → **Create new secret key** → cópiala (empieza por `sk-`).
+3. **En tu PC (VS Code):** crea un archivo llamado `.env.local` junto a
+   `package.json` con esta línea y reinicia `npm run dev`:
+   ```
+   OPENAI_API_KEY=sk-TU_CLAVE_AQUI
+   ```
+4. **En Vercel:** entra a tu proyecto → *Settings → Environment Variables* →
+   añade `OPENAI_API_KEY` con tu clave → haz **Redeploy**.
+
+### ¿Cuánto cuesta?
+
+- Se paga por uso, sin cuota mensual. El TTS cuesta **≈ US$1,50 por cada
+  100.000 caracteres** (~15.000 palabras, unas 30 páginas).
+- Escuchar un libro de 300 páginas ronda los **US$10–15** en total.
+- Los fragmentos ya escuchados quedan en caché en el navegador: volver a
+  escucharlos **no vuelve a cobrar**.
+- Sin la clave **no gastas nada**: el motor del navegador es 100 % gratuito.
+
+> 🔒 Seguridad: nunca subas la clave a GitHub ni la compartas. El `.gitignore`
+> del proyecto ya excluye los archivos `.env*`.
+
+---
+
 ## Instalar la app en el celular (PWA)
 
 1. Abre la URL desplegada en el navegador del celular.
@@ -114,13 +150,14 @@ navegador — y sigue funcionando **en modo avión**.
 ## Estructura del proyecto
 
 ```
-lectorvoz-vercel/
+lectorvoz/
 ├── public/
 │   ├── manifest.json          # Manifest PWA (nombre, iconos, colores)
 │   ├── sw.js                  # Service worker (modo offline)
 │   └── icons/                 # Logo propio (192, 512, maskable…)
 ├── src/
 │   ├── app/
+│   │   ├── api/tts/           # Motor HD opcional (OpenAI) — sin key responde 501
 │   │   ├── layout.tsx         # Metadata PWA + registro del service worker
 │   │   ├── page.tsx           # Flujo de 3 pasos + reproductor
 │   │   ├── icon.png           # Favicon generado
@@ -134,7 +171,7 @@ lectorvoz-vercel/
 │   └── lib/
 │       ├── lector.ts          # Fragmentación de texto y utilidades
 │       ├── parse-client.ts    # Análisis PDF/DOCX/TXT en el navegador (offline)
-│       └── browser-voice.ts   # Voces españolas del dispositivo (offline primero)
+│       └── browser-voice.ts   # Voces españolas del dispositivo (naturales primero)
 ├── next.config.ts
 └── package.json
 ```
@@ -146,7 +183,8 @@ lectorvoz-vercel/
 | Problema | Solución |
 |---|---|
 | «No se detectaron voces en español» | Instala un paquete de voz español (ver arriba) y recarga. En Chrome/Edge casi siempre hay voces disponibles. |
-| La voz HD dice «Requiere internet» | Es normal offline: el motor HD llama a la API de OpenAI. Usa el motor del navegador, que es gratuito y local. |
+| La voz HD dice «El servidor no tiene un proveedor de voz» | Falta `OPENAI_API_KEY` (ver la sección de arriba). La app pasa sola a la voz gratuita del navegador. |
+| La voz HD da error HTTP 401 | La clave es inválida o no tiene crédito. Revisa *Billing* en platform.openai.com. |
 | «El documento no contiene texto legible» | El PDF está escaneado como imagen (sin capa de texto). Usa un PDF con texto real. |
 | La PWA no muestra «Instalar» | iOS siempre es vía Compartir → Añadir a pantalla de inicio. En Android, abre con Chrome. |
 | Tras publicar cambios, la PWA sigue igual | Se actualiza al recargar dos veces. También puedes subir `VERSION` en `public/sw.js` para forzar la renovación de cachés. |

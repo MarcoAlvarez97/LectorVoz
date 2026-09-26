@@ -61,13 +61,21 @@ export function VoiceSelector({
             onClick={() => onEngineChange("server")}
             icon={offline ? <WifiOff className="h-4 w-4" /> : <CloudCog className="h-4 w-4" />}
             title="Voz HD (servidor)"
-            subtitle={offline ? "Requiere internet" : "Requiere OPENAI_API_KEY"}
+            subtitle={offline ? "Requiere internet" : "Más natural · opcional"}
           />
         </div>
         {engine === "browser" && (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            Usa las voces en español instaladas en tu dispositivo. Las marcadas como
-            «sin conexión» funcionan incluso en modo avión.
+            Usa las voces en español de tu dispositivo. Con internet elegimos las más
+            naturales (Edge «Natural», Google); las marcadas como «sin conexión» funcionan
+            incluso en modo avión.
+          </p>
+        )}
+        {engine === "server" && !offline && (
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+            Voz de audiolibro generada en el servidor. Necesita una clave de OpenAI
+            (OPENAI_API_KEY) en tu equipo o en Vercel; sin ella, la app usa
+            automáticamente la voz gratuita del navegador.
           </p>
         )}
       </div>
@@ -123,7 +131,7 @@ export function VoiceSelector({
                 {genderVoices.map((v) => (
                   <option key={v.uri} value={v.uri}>
                     {v.name}
-                    {v.local ? " · sin conexión" : " · requiere internet"}
+                    {v.natural ? " · natural" : v.local ? " · sin conexión" : " · requiere internet"}
                   </option>
                 ))}
               </select>
@@ -157,6 +165,10 @@ export function VoiceSelector({
           <span>1x · normal</span>
           <span>2x · rápida</span>
         </div>
+        <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800">
+          El cambio de velocidad se aplica al instante: la lectura sigue por donde va,
+          sin reiniciarse ni volver al comienzo.
+        </p>
       </div>
     </div>
   );

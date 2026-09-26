@@ -86,10 +86,15 @@ export default function Home() {
   const speedRef = useRef(speed);
   const stateRef = useRef<PlayerState>(state);
   const chunksRef = useRef(chunks);
+  const isOfflineRef = useRef(isOffline);
   const consecutiveFailuresRef = useRef(0);
   const activeChunkElRef = useRef<HTMLParagraphElement | null>(null);
   const speedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Última posición de lectura (palabra actual) para cambiar velocidad/voz sin volver al inicio */
+  const lastBoundaryRef = useRef<{ index: number; charIndex: number }>({ index: 0, charIndex: 0 });
+  /** Cambio de velocidad en pausa: se aplica al reanudar, volviendo a leer desde la palabra actual */
+  const pendingRespeakRef = useRef(false);
 
   engineRef.current = engine;
   voiceRef.current = voice;
@@ -97,6 +102,7 @@ export default function Home() {
   speedRef.current = speed;
   stateRef.current = state;
   chunksRef.current = chunks;
+  isOfflineRef.current = isOffline;
 
   const totalChunks = chunks.length;
 
@@ -214,7 +220,7 @@ export default function Home() {
 
   /** Lee un fragmento con la voz del navegador */
   const speakChunkBrowser = useCallback(
-    (index: number, token: number) => {
+    (index: number, token: number, startChar = 0) => {
       const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
       if (!synth) {
         setState("stopped");
@@ -227,13 +233,25 @@ export default function Home() {
         return;
       }
 
-      const text = chunksRef.current[index]?.text ?? "";
+      const fullText = chunksRef.current[index]?.text ?? "";
+      // startChar > 0 → reanuda desde una palabra concreta (cambio de velocidad/voz sin reiniciar)
+      const text = startChar > 0 ? fullText.slice(startChar) : fullText;
+      lastBoundaryRef.current = { index, charIndex: startChar };
+      if (!text.trim()) {
+        // Nada por leer desde esa posición: pasa al siguiente fragmento
+        if (index + 1 < chunksRef.current.length) {
+          playChunkRef.current?.(index + 1);
+        } else {
+          finishPlaybackRef.current?.();
+        }
+        return;
+      }
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = "es-ES";
       utterance.rate = Math.min(2, Math.max(0.5, speedRef.current));
       utterance.pitch = 1;
 
-      const matched = pickSpanishVoice(voiceRef.current, voiceUriRef.current);
+      const matched = pickSpanishVoice(voiceRef.current, voiceUriRef.current, !isOfflineRef.current);
       if (matched) {
         utterance.voice = matched;
         utterance.lang = matched.lang;
@@ -244,10 +262,10 @@ export default function Home() {
       };
       utterance.onboundary = (event) => {
         if (token !== playTokenRef.current) return;
-        if (utterance.text.length > 0) {
-          setChunkFraction(
-            Math.min(0.999, (event.charIndex || 0) / utterance.text.length)
-          );
+        const pos = startChar + (event.charIndex || 0);
+        lastBoundaryRef.current = { index, charIndex: pos };
+        if (fullText.length > 0) {
+          setChunkFraction(Math.min(0.999, pos / fullText.length));
         }
       };
       utterance.onend = () => {
@@ -282,10 +300,28 @@ export default function Home() {
     return message.includes("NO_PROVIDER") || message.includes("proveedor de voz");
   }, []);
 
-  /** Obtiene (o genera y cachea) el audio de un fragmento desde el servidor */
+  /** Aplica la velocidad actual al elemento de audio (cambio en vivo, sin reiniciar) */
+  const applyAudioRate = useCallback(
+    (rate: number) => {
+      const audio = getAudio();
+      try {
+        audio.preservesPitch = true;
+        (audio as unknown as { webkitPreservesPitch?: boolean }).webkitPreservesPitch = true;
+      } catch {
+        // Navegador antiguo: la voz sonará un tono más agudo/grave, pero funciona
+      }
+      audio.playbackRate = Math.min(2, Math.max(0.5, rate));
+    },
+    [getAudio]
+  );
+
+  /** Obtiene (o genera y cachea) el audio de un fragmento desde el servidor.
+   *  El audio siempre se genera a velocidad 1: la velocidad se aplica en el
+   *  cliente con playbackRate, así el cambio es instantáneo y la caché sirve
+   *  para cualquier velocidad. */
   const getChunkAudioUrl = useCallback(
-    async (index: number, gender: string, spd: number): Promise<string> => {
-      const key = `${gender}|${spd.toFixed(2)}|${index}`;
+    async (index: number, gender: string): Promise<string> => {
+      const key = `${gender}|${index}`;
       const cached = cacheRef.current.get(key);
       if (cached) return cached;
 
@@ -300,7 +336,7 @@ export default function Home() {
             const res = await fetch("/api/tts", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ text: chunkText, voice: gender, speed: spd }),
+              body: JSON.stringify({ text: chunkText, voice: gender, speed: 1 }),
             });
             if (!res.ok) {
               const data = await res.json().catch(() => null);
@@ -364,6 +400,8 @@ export default function Home() {
       setState("stopped");
       setIsLoadingChunk(false);
       consecutiveFailuresRef.current = 0;
+      pendingRespeakRef.current = false;
+      lastBoundaryRef.current = { index: 0, charIndex: 0 };
     },
     [getAudio, stopResumeWatchdog]
   );
@@ -439,19 +477,22 @@ export default function Home() {
 
       // Motor del navegador: sin generación previa
       if (engineRef.current === "browser") {
+        lastBoundaryRef.current = { index, charIndex: 0 };
         speakChunkBrowser(index, token);
         return;
       }
 
       setIsLoadingChunk(true);
       try {
-        const url = await getChunkAudioUrl(index, voiceRef.current, speedRef.current);
+        const url = await getChunkAudioUrl(index, voiceRef.current);
         if (token !== playTokenRef.current) return;
 
         const audio = getAudio();
         hasSrcRef.current = true;
-        playingKeyRef.current = `${voiceRef.current}|${speedRef.current.toFixed(2)}|${index}`;
+        playingKeyRef.current = `${voiceRef.current}|${index}`;
         audio.src = url;
+        // La velocidad se aplica en vivo con playbackRate (el audio se genera a 1x)
+        applyAudioRate(speedRef.current);
         audio.ontimeupdate = () => {
           if (token !== playTokenRef.current) return;
           if (audio.duration > 0) {
@@ -479,7 +520,7 @@ export default function Home() {
         // Precarga de los próximos 2 fragmentos
         const nextLimit = Math.min(index + 2, chunksRef.current.length - 1);
         for (let i = index + 1; i <= nextLimit; i++) {
-          getChunkAudioUrl(i, voiceRef.current, speedRef.current).catch(() => {});
+          getChunkAudioUrl(i, voiceRef.current).catch(() => {});
         }
       } catch (err) {
         if (token !== playTokenRef.current) return;
@@ -500,7 +541,7 @@ export default function Home() {
         handleChunkFailureRef.current?.(index, message);
       }
     },
-    [finishPlaybackRef, getAudio, getChunkAudioUrl, handleChunkFailureRef, isNoProviderError, speakChunkBrowser]
+    [applyAudioRate, finishPlaybackRef, getAudio, getChunkAudioUrl, handleChunkFailureRef, isNoProviderError, speakChunkBrowser]
   );
 
   const playChunkRef = useRef<(index: number) => void>(() => {});
@@ -526,6 +567,16 @@ export default function Home() {
       return;
     }
     if (state === "paused" && engineRef.current === "browser") {
+      // Si se cambió la velocidad en pausa, relee desde la palabra actual con la nueva velocidad
+      if (pendingRespeakRef.current) {
+        pendingRespeakRef.current = false;
+        const { index, charIndex } = lastBoundaryRef.current;
+        const token = ++playTokenRef.current;
+        setState("playing");
+        startResumeWatchdog();
+        speakChunkBrowser(index, token, charIndex);
+        return;
+      }
       window.speechSynthesis?.resume();
       setState("playing");
       startResumeWatchdog();
@@ -566,13 +617,29 @@ export default function Home() {
     playChunkRef.current?.(target);
   }, [unlockAudio]);
 
+  /** Relee el fragmento actual desde la palabra en curso (motor navegador,
+   *  para cambiar voz o velocidad sin volver al inicio del fragmento) */
+  const respeakFromCurrentWord = useCallback(() => {
+    const { index, charIndex } = lastBoundaryRef.current;
+    if (index !== currentChunkRef.current) {
+      playChunkRef.current?.(currentChunkRef.current);
+      return;
+    }
+    const token = ++playTokenRef.current;
+    speakChunkBrowser(index, token, charIndex);
+  }, [speakChunkBrowser]);
+
   /** Cambio de motor: reinicia el fragmento actual con el nuevo motor */
   const handleEngineChange = useCallback(
     (e: TtsEngine) => {
       if (e === engineRef.current) return;
       setEngine(e);
       engineRef.current = e;
-      if (e === "browser") clearCache();
+      if (e === "browser") {
+        clearCache();
+        pendingRespeakRef.current = false;
+        lastBoundaryRef.current = { index: currentChunkRef.current, charIndex: 0 };
+      }
       if (stateRef.current === "playing" || stateRef.current === "paused") {
         playChunkRef.current?.(currentChunkRef.current);
       }
@@ -580,7 +647,7 @@ export default function Home() {
     [clearCache]
   );
 
-  /** Cambio de voz (género): vuelve a la voz automática y retoma el fragmento */
+  /** Cambio de voz (género): retoma desde la palabra actual (navegador) o reinicia el fragmento (servidor) */
   const handleVoiceChange = useCallback(
     (v: VoiceGender) => {
       if (v === voiceRef.current) return;
@@ -590,36 +657,57 @@ export default function Home() {
       voiceUriRef.current = null;
       if (engineRef.current === "server") clearCache();
       if (stateRef.current === "playing" || stateRef.current === "paused") {
+        if (engineRef.current === "browser" && stateRef.current === "playing") {
+          respeakFromCurrentWord();
+        } else {
+          playChunkRef.current?.(currentChunkRef.current);
+        }
+      }
+    },
+    [clearCache, respeakFromCurrentWord]
+  );
+
+  /** Cambio de voz concreta del dispositivo: retoma desde la palabra actual */
+  const handleVoiceUriChange = useCallback(
+    (uri: string) => {
+      const next = uri === "" ? null : uri;
+      setVoiceUri(next);
+      voiceUriRef.current = next;
+      if (stateRef.current === "playing" && engineRef.current === "browser") {
+        respeakFromCurrentWord();
+        return;
+      }
+      if (stateRef.current === "playing" || stateRef.current === "paused") {
         playChunkRef.current?.(currentChunkRef.current);
       }
     },
-    [clearCache]
+    [respeakFromCurrentWord]
   );
 
-  /** Cambio de voz concreta del dispositivo */
-  const handleVoiceUriChange = useCallback((uri: string) => {
-    const next = uri === "" ? null : uri;
-    setVoiceUri(next);
-    voiceUriRef.current = next;
-    if (stateRef.current === "playing" || stateRef.current === "paused") {
-      playChunkRef.current?.(currentChunkRef.current);
-    }
-  }, []);
-
-  /** Cambio de velocidad con debounce */
+  /** Cambio de velocidad SIN reiniciar la lectura:
+   *  - Motor servidor: se aplica al instante con audio.playbackRate (mismo audio, misma posición).
+   *  - Motor navegador: relee desde la palabra actual con la nueva velocidad.
+   *  - En pausa: se recuerda y se aplica al reanudar. */
   const handleSpeedChange = useCallback(
     (s: number) => {
       setSpeed(s);
       speedRef.current = s;
       if (speedTimerRef.current) clearTimeout(speedTimerRef.current);
       speedTimerRef.current = setTimeout(() => {
-        if (stateRef.current === "playing" || stateRef.current === "paused") {
-          if (engineRef.current === "server") clearCache();
-          playChunkRef.current?.(currentChunkRef.current);
+        if (engineRef.current === "server") {
+          // Cambio en vivo: el audio sigue exactamente donde iba, solo más rápido o más lento
+          applyAudioRate(s);
+          return;
         }
-      }, 500);
+        // Motor navegador
+        if (stateRef.current === "playing") {
+          respeakFromCurrentWord();
+        } else if (stateRef.current === "paused") {
+          pendingRespeakRef.current = true;
+        }
+      }, 250);
     },
-    [clearCache]
+    [applyAudioRate, respeakFromCurrentWord]
   );
 
   // ---------- Carga y análisis del documento ----------
