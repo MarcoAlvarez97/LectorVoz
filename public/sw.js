@@ -11,7 +11,7 @@
  * Para publicar una nueva versión de la PWA, sube VERSION (p. ej. "v1.0.1");
  * los cachés viejos se limpian solos al activarse.
  */
-const VERSION = "v1.1.0";
+const VERSION = "v1.2.0";
 const STATIC_CACHE = `lectorvoz-static-${VERSION}`;
 const RUNTIME_CACHE = `lectorvoz-runtime-${VERSION}`;
 

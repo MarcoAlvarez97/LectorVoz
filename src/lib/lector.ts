@@ -144,6 +144,18 @@ export function formatDuration(totalSeconds: number): string {
   return `${seconds} s`;
 }
 
+/** Formatea segundos como reloj de reproductor: "4:07" u "1:02:33" */
+export function formatClock(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const seconds = s % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 /** Segmento de habla: texto + offset absoluto dentro del fragmento original */
 export interface SpeechSegment {
   offset: number;
@@ -158,14 +170,17 @@ export interface SpeechSegment {
  * oración sin cortar, reiniciar ni repetir nada de la lectura en curso.
  *
  * Reglas de corte: tras puntuación fuerte (.!?…) si el bloque ya tiene ≥40
- * caracteres; tras puntuación suave (,;:) si supera ~200; y corte forzado por
+ * caracteres; tras puntuación suave (,;:) si supera ~150; y corte forzado por
  * palabra como último recurso. `from` permite empezar desde cualquier carácter
  * (salto de la barra de progreso).
+ *
+ * Segmentos cortos = al cambiar la velocidad, la nueva tarifa se nota en
+ * pocos segundos, sin cortar ni repetir nada de la lectura en curso.
  */
 export function splitSpeechSegments(
   text: string,
   from = 0,
-  maxLen = 240
+  maxLen = 150
 ): SpeechSegment[] {
   const segments: SpeechSegment[] = [];
   let start = Math.min(Math.max(0, from), text.length);
@@ -178,9 +193,9 @@ export function splitSpeechSegments(
     const nextChar = i < text.length ? text[i] : "";
     const hardCut = ".!?…".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
     const softCut = ",;:".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
-    const forced = (len >= maxLen && /\s/.test(nextChar)) || len > maxLen + 120;
+    const forced = (len >= maxLen && /\s/.test(nextChar)) || len > maxLen + 80;
 
-    if ((hardCut && len >= 40) || (softCut && len >= 200) || forced) {
+    if ((hardCut && len >= 40) || (softCut && len >= 150) || forced) {
       const slice = text.slice(start, i);
       if (slice.trim()) segments.push({ offset: start, text: slice.trim() });
       while (i < text.length && /\s/.test(text[i])) i += 1;

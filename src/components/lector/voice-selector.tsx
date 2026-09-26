@@ -1,19 +1,14 @@
 "use client";
 
-import { SlidersHorizontal, UserRound, UserRoundCheck, Volume2, CloudCog, WifiOff } from "lucide-react";
+import { SlidersHorizontal, UserRound, UserRoundCheck } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 
 export type VoiceGender = "female" | "male";
-export type TtsEngine = "browser" | "server";
 
 interface VoiceSelectorProps {
-  engine: TtsEngine;
-  onEngineChange: (engine: TtsEngine) => void;
   voice: VoiceGender;
   onVoiceChange: (voice: VoiceGender) => void;
-  /** Sin conexión: el motor HD del servidor queda deshabilitado */
-  offline: boolean;
   speed: number;
   onSpeedChange: (speed: number) => void;
   disabled?: boolean;
@@ -21,60 +16,19 @@ interface VoiceSelectorProps {
 
 /**
  * Selector de voz: EXACTAMENTE una voz por género (mujer / hombre).
- * El dispositivo elige automáticamente la mejor voz en español disponible
- * para el género elegido — sin listas ni opciones extra.
+ * El dispositivo aporta la voz y la app elige automáticamente la mejor
+ * disponible en español para el género elegido — sin motores, sin listas
+ * y sin opciones extra.
  */
 export function VoiceSelector({
-  engine,
-  onEngineChange,
   voice,
   onVoiceChange,
-  offline,
   speed,
   onSpeedChange,
   disabled,
 }: VoiceSelectorProps) {
   return (
     <div className={cn("space-y-4", disabled && "opacity-60 pointer-events-none")}>
-      {/* Motor de voz */}
-      <div className="rounded-xl border border-zinc-200 bg-card p-3 dark:border-zinc-800">
-        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Motor de voz
-        </p>
-        <div className="grid grid-cols-2 gap-2">
-          <EngineOption
-            selected={engine === "browser"}
-            onClick={() => onEngineChange("browser")}
-            icon={<Volume2 className="h-4 w-4" />}
-            title="Voz del navegador"
-            subtitle="Gratis · sin conexión"
-          />
-          <EngineOption
-            selected={engine === "server" && !offline}
-            disabled={offline}
-            onClick={() => onEngineChange("server")}
-            icon={offline ? <WifiOff className="h-4 w-4" /> : <CloudCog className="h-4 w-4" />}
-            title="Voz HD (servidor)"
-            subtitle={offline ? "Requiere internet" : "Más natural · opcional"}
-          />
-        </div>
-        {engine === "browser" && (
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            Una voz por género: elegís <span className="font-medium">mujer</span> u{" "}
-            <span className="font-medium">hombre</span> y la app toma automáticamente la mejor
-            voz en español de tu dispositivo (las «naturales» primero si hay internet, o las
-            instaladas que funcionan sin conexión).
-          </p>
-        )}
-        {engine === "server" && !offline && (
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-            Voz de audiolibro generada en el servidor. Necesita una clave de OpenAI
-            (OPENAI_API_KEY) en tu equipo o en Vercel; sin ella, la app usa
-            automáticamente la voz gratuita del navegador.
-          </p>
-        )}
-      </div>
-
       {/* Género de la voz: una sola voz por género */}
       <div className="grid grid-cols-2 gap-3">
         <VoiceCard
@@ -91,11 +45,17 @@ export function VoiceSelector({
           onClick={() => onVoiceChange("male")}
           icon={<UserRound className="h-7 w-7" strokeWidth={1.6} />}
           title="Voz de hombre"
-          subtitle="Profesional y clara"
+          subtitle="Grave y clara"
           selectedClasses="ring-2 ring-teal-600 bg-teal-50 border-teal-300 dark:bg-teal-950/40 dark:border-teal-700"
           iconClasses="bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-400"
         />
       </div>
+
+      <p className="px-1 text-xs leading-relaxed text-muted-foreground">
+        La app elige automáticamente la mejor voz en español de tu dispositivo
+        para el género elegido: voces naturales si hay internet, o las voces
+        instaladas que funcionan sin conexión.
+      </p>
 
       {/* Velocidad */}
       <div className="rounded-xl border border-zinc-200 bg-card p-3.5 dark:border-zinc-800">
@@ -122,56 +82,11 @@ export function VoiceSelector({
           <span>2x · rápida</span>
         </div>
         <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
-          El cambio de velocidad se aplica al instante y <span className="font-semibold">jamás
+          El cambio de velocidad se aplica en segundos y <span className="font-semibold">jamás
           reinicia la lectura</span>: sigue exactamente por donde va, solo acelera o frena.
         </p>
       </div>
     </div>
-  );
-}
-
-function EngineOption({
-  selected,
-  onClick,
-  icon,
-  title,
-  subtitle,
-  disabled,
-}: {
-  selected: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  title: string;
-  subtitle: string;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={disabled ? undefined : onClick}
-      aria-pressed={selected}
-      disabled={disabled}
-      className={cn(
-        "flex min-h-[44px] items-center gap-2.5 rounded-lg border p-2.5 text-left transition-all",
-        selected
-          ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500 dark:bg-emerald-500/10"
-          : "border-zinc-200 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:border-zinc-700 dark:hover:bg-zinc-900",
-        disabled && "cursor-not-allowed opacity-55 hover:border-zinc-200 hover:bg-transparent dark:hover:border-zinc-800"
-      )}
-    >
-      <span
-        className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-          selected ? "bg-emerald-600 text-white" : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-        )}
-      >
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-semibold text-foreground">{title}</span>
-        <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
-      </span>
-    </button>
   );
 }
 

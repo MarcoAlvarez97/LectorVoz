@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Forward, Pause, Play, Rewind, Square, Loader2, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
+import { formatClock } from "@/lib/lector";
 import type { PlayerState } from "./player-bar";
 
 interface WalkingModeProps {
@@ -15,6 +16,8 @@ interface WalkingModeProps {
   progressPercent: number;
   isLoadingChunk: boolean;
   currentText: string;
+
+  totalSeconds: number;
   onPlayPause: () => void;
   onStop: () => void;
   onPrev: () => void;
@@ -32,14 +35,31 @@ export function WalkingMode({
   progressPercent,
   isLoadingChunk,
   currentText,
+  totalSeconds,
   onPlayPause,
   onStop,
   onPrev,
   onNext,
   onSeek,
 }: WalkingModeProps) {
+  // Mientras se arrastra la barra se muestra el valor local; al soltar salta.
+  // scrubRef permite confirmar el salto aunque el navegador no dispare
+  // onValueCommit (pasa con End/Home en algunos navegadores).
   const [scrub, setScrub] = useState<number | null>(null);
+  const scrubRef = useRef<number | null>(null);
   const display = scrub ?? progressPercent;
+  const scrubElapsed = (display / 100) * totalSeconds;
+
+  const setScrubValue = (v: number | null) => {
+    scrubRef.current = v;
+    setScrub(v);
+  };
+  const commitScrub = () => {
+    const v = scrubRef.current;
+    if (v === null) return;
+    setScrubValue(null);
+    onSeek(v);
+  };
 
   if (!open) return null;
 
@@ -72,21 +92,26 @@ export function WalkingMode({
       </div>
 
       <div className="mx-5 flex items-center gap-3">
+        <span className="w-12 shrink-0 text-xs font-semibold tabular-nums text-white">
+          {formatClock(scrubElapsed)}
+        </span>
         <Slider
           value={[Math.min(100, Math.max(0, display))]}
           min={0}
           max={100}
           step={0.1}
           aria-label="Barra de audio: arrastrá para volver o avanzar"
-          onValueChange={(values) => setScrub(values[0])}
+          onValueChange={(values) => setScrubValue(values[0])}
           onValueCommit={(values) => {
-            setScrub(null);
+            setScrubValue(null);
             onSeek(values[0]);
           }}
-          className="flex-1 [&_[data-slot=slider-track]]:bg-zinc-800 [&_[data-slot=slider-range]]:bg-emerald-400 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-emerald-400 [&_[data-slot=slider-thumb]]:bg-white"
+          onKeyUp={commitScrub}
+          onBlur={commitScrub}
+          className="h-5 flex-1 [&_[data-slot=slider-track]]:h-2 [&_[data-slot=slider-track]]:bg-zinc-700 [&_[data-slot=slider-range]]:bg-emerald-400 [&_[data-slot=slider-thumb]]:size-5 [&_[data-slot=slider-thumb]]:border-2 [&_[data-slot=slider-thumb]]:border-emerald-400 [&_[data-slot=slider-thumb]]:bg-white"
         />
-        <span className="w-12 shrink-0 text-right text-xs font-medium tabular-nums text-zinc-400">
-          {Math.round(display)}%
+        <span className="w-14 shrink-0 text-right text-xs font-semibold tabular-nums text-zinc-400">
+          {formatClock(totalSeconds)}
         </span>
       </div>
 
