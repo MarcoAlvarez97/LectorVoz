@@ -1,6 +1,6 @@
 /**
  * Utilidades para LectorVoz:
- * - Fragmentación de texto en trozos compatibles con TTS (máx. 1024 caracteres)
+ * - Fragmentación de texto en trozos compatibles con TTS (máx. 800 caracteres)
  * - Estimación de duración de lectura
  * - Formateo de tiempos
  */
@@ -9,6 +9,13 @@ export interface TextChunk {
   index: number;
   text: string;
 }
+
+/**
+ * Velocidad media de habla en español (caracteres por segundo a 1x).
+ * Se usa para estimar la duración de los fragmentos cuyo audio aún no
+ * se ha generado (el reloj los va reemplazando por duración real).
+ */
+export const CHARS_PER_SECOND = 14.5;
 
 /** Tamaño máximo seguro por fragmento (el límite de la API es 1024) */
 const MAX_CHUNK_LENGTH = 800;
@@ -154,58 +161,6 @@ export function formatClock(totalSeconds: number): string {
     return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-/** Segmento de habla: texto + offset absoluto dentro del fragmento original */
-export interface SpeechSegment {
-  offset: number;
-  text: string;
-}
-
-/**
- * Divide el texto en segmentos del tamaño de una oración (con offset absoluto).
- *
- * Se usa para la lectura con la voz del navegador: cada segmento se sintetiza
- * justo ANTES de hablarse, así un cambio de velocidad se aplica en la siguiente
- * oración sin cortar, reiniciar ni repetir nada de la lectura en curso.
- *
- * Reglas de corte: tras puntuación fuerte (.!?…) si el bloque ya tiene ≥40
- * caracteres; tras puntuación suave (,;:) si supera ~150; y corte forzado por
- * palabra como último recurso. `from` permite empezar desde cualquier carácter
- * (salto de la barra de progreso).
- *
- * Segmentos cortos = al cambiar la velocidad, la nueva tarifa se nota en
- * pocos segundos, sin cortar ni repetir nada de la lectura en curso.
- */
-export function splitSpeechSegments(
-  text: string,
-  from = 0,
-  maxLen = 150
-): SpeechSegment[] {
-  const segments: SpeechSegment[] = [];
-  let start = Math.min(Math.max(0, from), text.length);
-  let i = start;
-
-  while (i < text.length) {
-    const prevChar = text[i];
-    i += 1;
-    const len = i - start;
-    const nextChar = i < text.length ? text[i] : "";
-    const hardCut = ".!?…".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
-    const softCut = ",;:".includes(prevChar) && (nextChar === "" || /\s/.test(nextChar));
-    const forced = (len >= maxLen && /\s/.test(nextChar)) || len > maxLen + 80;
-
-    if ((hardCut && len >= 40) || (softCut && len >= 150) || forced) {
-      const slice = text.slice(start, i);
-      if (slice.trim()) segments.push({ offset: start, text: slice.trim() });
-      while (i < text.length && /\s/.test(text[i])) i += 1;
-      start = i;
-    }
-  }
-
-  const tail = text.slice(start);
-  if (tail.trim()) segments.push({ offset: start, text: tail.trim() });
-  return segments;
 }
 
 /** Limpia texto extraído de documentos */

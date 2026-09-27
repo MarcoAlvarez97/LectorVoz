@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Forward, Pause, Play, Rewind, Square, Loader2, X } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
@@ -17,6 +17,9 @@ interface WalkingModeProps {
   isLoadingChunk: boolean;
   currentText: string;
 
+  /** Segundos de contenido transcurridos (reloj real del reproductor) */
+  elapsedSeconds: number;
+  /** Duración total del contenido (real donde ya hay audio generado) */
   totalSeconds: number;
   onPlayPause: () => void;
   onStop: () => void;
@@ -35,6 +38,7 @@ export function WalkingMode({
   progressPercent,
   isLoadingChunk,
   currentText,
+  elapsedSeconds,
   totalSeconds,
   onPlayPause,
   onStop,
@@ -43,23 +47,47 @@ export function WalkingMode({
   onSeek,
 }: WalkingModeProps) {
   // Mientras se arrastra la barra se muestra el valor local; al soltar salta.
-  // scrubRef permite confirmar el salto aunque el navegador no dispare
-  // onValueCommit (pasa con End/Home en algunos navegadores).
+  // Radix a veces NO dispara onValueCommit: el commit se confirma también
+  // con pointerup/touchend/keyup globales para que el reloj NUNCA se congele.
   const [scrub, setScrub] = useState<number | null>(null);
   const scrubRef = useRef<number | null>(null);
+  const draggingRef = useRef(false);
   const display = scrub ?? progressPercent;
-  const scrubElapsed = (display / 100) * totalSeconds;
+  // Reloj izquierdo: durante el arrastre muestra la posición elegida;
+  // el resto del tiempo, el tiempo real consumido del audio.
+  const scrubElapsed = scrub !== null ? (scrub / 100) * totalSeconds : elapsedSeconds;
 
   const setScrubValue = (v: number | null) => {
     scrubRef.current = v;
     setScrub(v);
   };
+
+  const commitScrubRef = useRef<() => void>(() => {});
+
   const commitScrub = () => {
+    draggingRef.current = false;
     const v = scrubRef.current;
     if (v === null) return;
     setScrubValue(null);
     onSeek(v);
   };
+  commitScrubRef.current = commitScrub;
+
+  useEffect(() => {
+    const finish = () => {
+      if (draggingRef.current) commitScrubRef.current();
+    };
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("touchend", finish);
+    window.addEventListener("keyup", finish);
+    return () => {
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("touchend", finish);
+      window.removeEventListener("keyup", finish);
+    };
+  }, []);
 
   if (!open) return null;
 
@@ -101,6 +129,12 @@ export function WalkingMode({
           max={100}
           step={0.1}
           aria-label="Barra de audio: arrastrá para volver o avanzar"
+          onPointerDown={() => {
+            draggingRef.current = true;
+          }}
+          onKeyDown={() => {
+            draggingRef.current = true;
+          }}
           onValueChange={(values) => setScrubValue(values[0])}
           onValueCommit={(values) => {
             setScrubValue(null);

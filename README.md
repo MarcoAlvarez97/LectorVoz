@@ -1,14 +1,15 @@
 # LectorVoz 🎧📖
 
-> **VERSIÓN 1.3.0 — FINAL. Todos los cambios incluidos: voces mujer/hombre correctas, sin Voz HD, velocidad sin reinicio, barra de progreso con reloj y tiempo total, 200 MB, modo claro/oscuro.**
+> **VERSIÓN 1.4.0 — MOTOR NUEVO DE VOZ NEURONAL.** Mujer SIEMPRE mujer (Dalia), hombre SIEMPRE hombre (Jorge), cero voz robótica, adelantar real con la barra, velocidad instantánea que JAMÁS reinicia y reloj de reproductor con tiempo total.
 
 Convierte tus documentos (**PDF, Word DOCX, TXT, MD, CSV**) en audiolibros: cárgalos,
 analízalos y escúchalos en voz alta con voz de **hombre o mujer**, mientras caminas,
 cocinas o viajas.
 
-> ✨ **Funciona 100 % sin conexión** después de la primera visita: el análisis de
-> documentos y la lectura por voz ocurren en tu propio dispositivo. **Sin claves,
-> sin servidores de voz, sin configuración.**
+> ✨ **Análisis 100 % en tu dispositivo** (funciona sin conexión) y **voz neuronal
+> generada al instante** sin claves ni configuración. Para generar la voz se
+> necesita internet; cada fragmento generado queda guardado en el navegador
+> para volver a escucharlo sin regenerarlo.
 
 ---
 
@@ -17,14 +18,14 @@ cocinas o viajas.
 | Función | Detalle |
 |---|---|
 | 📄 Análisis de documentos | **En el navegador** (offline): PDF con `pdfjs-dist`, Word con `mammoth`, texto plano nativo. Sin servidores, sin subir tu archivo a nadie. **Hasta 200 MB** y ~320.000 palabras por documento. |
-| 🔊 Lectura por voz | **Web Speech API**: usa las voces en español de tu dispositivo (gratis y offline). Sin motores extra ni claves de API. |
-| 👩 voz de mujer / 👨 voz de hombre | **Exactamente una voz por género.** La app elige automáticamente la mejor voz en español de tu dispositivo: para **mujer** solo acepta voces femeninas o de género desconocido (nunca una masculina); para **hombre** usa una voz masculina natural y, si tu dispositivo no tiene ninguna, baja el tono de la mejor voz disponible para que suene a hombre. Se vetan las voces robóticas (Pico/eSpeak) siempre que haya alternativa. |
-| ⏩ Velocidad | 0.5x – 2x. Al mover el slider, la lectura **continúa desde la palabra en curso con la nueva velocidad — jamás se reinicia ni vuelve al inicio**. La posición solo la cambia el usuario. |
-| 🎚️ Barra de audio con reloj | Como un reproductor de música: **tiempo transcurrido / duración total estimada** (se ajusta a la velocidad elegida) y barra deslizable para **volver o saltar a cualquier parte** del documento. También en el modo caminata. |
+| 🔊 Lectura por voz | **Voces neuronales reales (audio MP3)** generadas al instante: calidad idéntica en cualquier dispositivo. Sin claves API. Requiere internet mientras lee. |
+| 👩 voz de mujer / 👨 voz de hombre | **Exactamente una voz por género, garantizada:** mujer = `es-MX-DaliaNeural`, hombre = `es-MX-JorgeNeural`. Imposible que suenen al revés y sin voces robóticas del sistema. |
+| ⏩ Velocidad | 0.5x – 2x. Al mover el slider se ajusta `playbackRate` del audio en curso: **la lectura sigue exactamente por el mismo punto — jamás se reinicia, nunca vuelve atrás, no se corta**. |
+| 🎚️ Barra de audio con reloj | Como un reproductor de música: **tiempo transcurrido real / duración total** (duración real de los fragmentos ya generados + estimado del resto) y barra deslizable para **adelantar o volver a cualquier punto exacto** del documento. También en el modo caminata. |
 | 🌗 Modo claro / oscuro | Botón en el encabezado; respeta la preferencia del sistema en la primera visita y guarda tu elección. |
 | 🚶 Modo caminata | Pantalla completa con texto gigante y controles grandes. |
 | 📱 **PWA instalable** | Instálala como app en Android, iPhone, Windows o macOS. Incluye logo propio, pantalla standalone y acceso desde el escritorio. |
-| 🌐 **Modo offline** | Service worker que guarda la app completa: abre, analiza y escucha documentos sin internet. |
+| 🌐 **Modo offline** | Service worker que guarda la app completa: abre y analiza documentos sin internet. La voz neuronal necesita internet para generar el audio. |
 | 🎯 Sincronización de texto | El párrafo que se lee se resalta y hace scroll automático; toca cualquier párrafo para saltar a él. |
 
 ---

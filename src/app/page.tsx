@@ -20,15 +20,11 @@ import {
 } from "@/components/lector/voice-selector";
 import { PlayerBar, type PlayerState } from "@/components/lector/player-bar";
 import { WalkingMode } from "@/components/lector/walking-mode";
-import {
-  ensureVoices,
-  pickSpanishVoice,
-} from "@/lib/browser-voice";
 import { parseFileClient } from "@/lib/parse-client";
 import { InstallButton, OfflineBadge } from "@/components/lector/pwa";
 import { ThemeToggle } from "@/components/lector/theme-toggle";
 import {
-  splitSpeechSegments,
+  CHARS_PER_SECOND,
   estimateSeconds,
   formatDuration,
   splitTextIntoChunks,
@@ -36,13 +32,14 @@ import {
 } from "@/lib/lector";
 import { cn } from "@/lib/utils";
 
-/**
- * Velocidad media de habla en español (caracteres por segundo a 1x).
- * Se usa para el reloj del reproductor y para que la barra de progreso
- * avance SIEMPRE, incluso en dispositivos donde el navegador no dispara
- * los eventos de palabra (onboundary) — error típico de varios Android.
- */
-const CHARS_PER_SECOND = 14.5;
+/** WAV silencioso de 44 bytes: desbloquea el elemento <audio> en iOS */
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+
+/** Máximo de audios generados retenidos en memoria a la vez */
+const MAX_CACHED_AUDIO = 80;
+/** Cuántos fragmentos por delante se pregeneran para evitar silencios */
+const PREFETCH_AHEAD = 1;
 
 interface DocInfo {
   filename: string;
@@ -53,6 +50,24 @@ interface DocInfo {
   words: number;
   chars: number;
   paragraphs: number;
+}
+
+interface CachedAudio {
+  url: string;
+  duration: number;
+}
+
+/** Duración (segundos) de un MP3 desde su URL, sin reproducirlo */
+function audioDurationOf(url: string): Promise<number> {
+  return new Promise((resolve) => {
+    const probe = new Audio();
+    probe.preload = "metadata";
+    const done = (value: number) =>
+      resolve(Number.isFinite(value) && value > 0 ? value : 0);
+    probe.onloadedmetadata = () => done(probe.duration);
+    probe.onerror = () => done(0);
+    probe.src = url;
+  });
 }
 
 export default function Home() {
@@ -67,421 +82,404 @@ export default function Home() {
   const [chunkFraction, setChunkFraction] = useState(0);
   const [isLoadingChunk, setIsLoadingChunk] = useState(false);
   const [voice, setVoice] = useState<VoiceGender>("female");
-  const [isOffline, setIsOffline] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [walkingOpen, setWalkingOpen] = useState(false);
+  /** Reloj estilo reproductor: segundos de contenido consumidos */
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  /** Duración total del contenido (real donde ya se generó audio) */
+  const [totalSeconds, setTotalSeconds] = useState(0);
 
-  // ---------- Refs para la cadena de reproducción ----------
+  // ---------- Refs del motor de audio ----------
   const playTokenRef = useRef(0);
+  const activeTokenRef = useRef(0);
   const currentChunkRef = useRef(0);
   const voiceRef = useRef(voice);
   const speedRef = useRef(speed);
   const stateRef = useRef(state);
   const chunksRef = useRef(chunks);
-  const isOfflineRef = useRef(isOffline);
   const consecutiveFailuresRef = useRef(0);
   const activeChunkElRef = useRef<HTMLParagraphElement | null>(null);
-  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  /** Última posición leída (palabra actual) para cambiar voz/velocidad sin volver al inicio */
-  const lastBoundaryRef = useRef<{ index: number; charIndex: number }>({ index: 0, charIndex: 0 });
-  /** Ancla del reloj: posición exacta conocida + momento en que se midió */
-  const boundaryPosRef = useRef<{ index: number; charIndex: number; ts: number }>({
-    index: 0,
-    charIndex: 0,
-    ts: 0,
-  });
-  /** true si el dispositivo reporta eventos de palabra (onboundary) */
-  const boundaryFiredRef = useRef(false);
-  /** Voz/velocidad cambiadas en pausa: al reanudar se vuelve a hablar desde la palabra actual */
-  const pendingRestartRef = useRef(false);
-  const speedRespeakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Desbloqueo de la síntesis de voz en iOS (hablar 1º dentro del gesto) */
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** Caché de audios generados: clave "voz:fragmento" (SIN velocidad) */
+  const cacheRef = useRef<Map<string, CachedAudio>>(new Map());
+  const inflightRef = useRef<Map<string, Promise<CachedAudio>>>(new Map());
   const unlockedRef = useRef(false);
+  /** Voz cambiada en pausa: al reanudar se regenera el fragmento actual */
+  const pendingRestartRef = useRef(false);
 
   voiceRef.current = voice;
   speedRef.current = speed;
   stateRef.current = state;
   chunksRef.current = chunks;
-  isOfflineRef.current = isOffline;
 
   const totalChunks = chunks.length;
 
-  // ---------- Watchdog: fix del bug de Chrome que corta audios largos ----------
-
-  const stopResumeWatchdog = useCallback(() => {
-    if (watchdogRef.current) {
-      clearInterval(watchdogRef.current);
-      watchdogRef.current = null;
-    }
-  }, []);
-
-  const startResumeWatchdog = useCallback(() => {
-    stopResumeWatchdog();
-    watchdogRef.current = setInterval(() => {
-      if (
-        stateRef.current === "playing" &&
-        typeof window !== "undefined" &&
-        "speechSynthesis" in window &&
-        window.speechSynthesis.speaking
-      ) {
-        window.speechSynthesis.pause();
-        window.speechSynthesis.resume();
-      }
-    }, 10_000);
-  }, [stopResumeWatchdog]);
-
-  /** iOS exige una llamada speak() dentro del gesto del usuario para habilitar el audio */
-  const unlockSpeech = useCallback(() => {
-    if (unlockedRef.current) return;
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      const u = new SpeechSynthesisUtterance(" ");
-      u.volume = 0;
-      u.lang = "es-ES";
-      window.speechSynthesis.speak(u);
-      unlockedRef.current = true;
-    } catch {
-      // navegador sin síntesis: el error real se muestra al intentar leer
-    }
-  }, []);
-
   // ---------- Limpieza al desmontar ----------
-
   useEffect(() => {
     return () => {
       playTokenRef.current++;
-      stopResumeWatchdog();
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
+      audioRef.current?.pause();
+      for (const entry of cacheRef.current.values()) {
+        URL.revokeObjectURL(entry.url);
       }
-      if (speedRespeakTimerRef.current) clearTimeout(speedRespeakTimerRef.current);
-    };
-  }, [stopResumeWatchdog]);
-
-  // ---------- Conexión y precarga de voces ----------
-
-  useEffect(() => {
-    const update = () => setIsOffline(!navigator.onLine);
-    update();
-    window.addEventListener("online", update);
-    window.addEventListener("offline", update);
-    return () => {
-      window.removeEventListener("online", update);
-      window.removeEventListener("offline", update);
+      cacheRef.current.clear();
     };
   }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const synth = window.speechSynthesis;
-    synth.getVoices(); // fuerza la carga temprana
-    const onChange = () => synth.getVoices();
-    synth.addEventListener?.("voiceschanged", onChange);
-    return () => synth.removeEventListener?.("voiceschanged", onChange);
-  }, []);
+  // ---------- Reloj del reproductor ----------
 
-  // ---------- Reloj del reproductor (siempre avanza mientras lee) ----------
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (stateRef.current !== "playing") return;
-      const chunk = chunksRef.current[currentChunkRef.current];
-      if (!chunk || chunk.text.length === 0) return;
-      const cps = CHARS_PER_SECOND * Math.min(2, Math.max(0.5, speedRef.current));
-      const b = boundaryPosRef.current;
-      if (b.index !== currentChunkRef.current || b.ts <= 0) return;
-      const chars = b.charIndex + ((performance.now() - b.ts) / 1000) * cps;
-      setChunkFraction(Math.min(0.999, Math.max(0, chars / chunk.text.length)));
-    }, 250);
-    return () => clearInterval(timer);
-  }, []);
-
-  // ---------- Motor del dispositivo (Web Speech API) ----------
-
-  /** Lee un fragmento con la voz del dispositivo, ORACIÓN POR ORACIÓN.
-   *
-   *  Cada oración se crea justo antes de hablarse con la voz y la velocidad
-   *  vigentes en ese momento. startChar > 0 permite retomar desde una palabra
-   *  concreta (cambio de voz, de velocidad o salto con la barra). */
-  const speakChunkBrowser = useCallback(
-    (index: number, token: number, startChar = 0) => {
-      const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-      if (!synth) {
-        setState("stopped");
-        setIsLoadingChunk(false);
-        toast({
-          title: "Navegador sin síntesis de voz",
-          description: "Tu navegador no soporta lectura por voz. Usa Chrome, Edge o Safari.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      // Sin voces instaladas no hay nada que reproducir: avisa una vez y corta
-      if (synth.getVoices().length === 0) {
-        setState("stopped");
-        setIsLoadingChunk(false);
-        toast({
-          title: "No hay voces disponibles en tu dispositivo",
-          description:
-            "Instala voces en español (Android: Síntesis de voz · Windows: Configuración → Voz) o prueba en Chrome, Edge o Safari.",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      const fullText = chunksRef.current[index]?.text ?? "";
-      let from = Math.min(Math.max(0, startChar), fullText.length);
-      // Si caemos a mitad de palabra, retrocede al inicio de la palabra
-      if (from > 0 && !/\s/.test(fullText[from - 1] ?? " ")) {
-        const space = fullText.lastIndexOf(" ", from);
-        if (space !== -1 && space > from - 40) from = space + 1;
-      }
-      lastBoundaryRef.current = { index, charIndex: from };
-
-      const segments = splitSpeechSegments(fullText, from);
-      if (segments.length === 0) {
-        // Nada por leer desde esa posición: pasa al siguiente fragmento
-        if (index + 1 < chunksRef.current.length) {
-          playChunkRef.current?.(index + 1);
-        } else {
-          finishPlaybackRef.current?.();
-        }
-        return;
-      }
-
-      let si = 0;
-      const speakNext = () => {
-        if (token !== playTokenRef.current) return;
-        if (si >= segments.length) {
-          // Fragmento completo: encadena el siguiente
-          stopResumeWatchdog();
-          consecutiveFailuresRef.current = 0;
-          setChunkFraction(0.999);
-          if (index + 1 < chunksRef.current.length) {
-            playChunkRef.current?.(index + 1);
-          } else {
-            finishPlaybackRef.current?.();
-          }
-          return;
-        }
-        const seg = segments[si];
-        const utterance = new SpeechSynthesisUtterance(seg.text);
-        utterance.lang = "es-ES";
-        // Velocidad vigente AL COMENZAR esta oración (cambio sin reiniciar)
-        utterance.rate = Math.min(2, Math.max(0.5, speedRef.current));
-
-        // Voz del dispositivo: exactamente una por género (mujer/hombre).
-        // Si no hay voz masculina instalada, se simula bajando el tono.
-        const picked = pickSpanishVoice(voiceRef.current, !isOfflineRef.current);
-        if (picked) {
-          utterance.voice = picked.voice;
-          utterance.lang = picked.voice.lang;
-          utterance.pitch = picked.pitch;
-        }
-
-        utterance.onstart = () => {
-          if (token !== playTokenRef.current) return;
-          setIsLoadingChunk(false);
-          // Ancla del reloj para este segmento (los onboundary lo afinan)
-          boundaryPosRef.current = {
-            index,
-            charIndex: seg.offset,
-            ts: performance.now(),
-          };
-        };
-        utterance.onboundary = (event) => {
-          if (token !== playTokenRef.current) return;
-          boundaryFiredRef.current = true;
-          const pos = seg.offset + (event.charIndex || 0);
-          lastBoundaryRef.current = { index, charIndex: pos };
-          boundaryPosRef.current = { index, charIndex: pos, ts: performance.now() };
-          if (fullText.length > 0) {
-            setChunkFraction(Math.min(0.999, Math.max(0, pos / fullText.length)));
-          }
-        };
-        utterance.onend = () => {
-          if (token !== playTokenRef.current) return;
-          si += 1;
-          speakNext();
-        };
-        utterance.onerror = (event) => {
-          if (token !== playTokenRef.current) return;
-          const errorType = (event as SpeechSynthesisErrorEvent).error;
-          if (errorType === "interrupted" || errorType === "canceled") return;
-          stopResumeWatchdog();
-          handleChunkFailureRef.current?.(index, "La voz del navegador falló al leer el fragmento");
-        };
-
-        synth.speak(utterance);
-      };
-
-      synth.cancel();
-      speakNext();
-      startResumeWatchdog();
-    },
-    [startResumeWatchdog, stopResumeWatchdog]
+  /** Segundos estimados de contenido de un fragmento aún sin audio real */
+  const estimateChunkSeconds = useCallback(
+    (index: number) => (chunksRef.current[index]?.text.length ?? 0) / CHARS_PER_SECOND,
+    []
   );
+
+  /**
+   * Reloj estilo reproductor: transcurrido y duración total del contenido.
+   * Usa duraciones REALES de los audios ya generados y estima el resto
+   * (el estimado se va reemplazando por duración real a medida que lee).
+   */
+  const computeClock = useCallback(
+    (curIndex: number, curTime: number) => {
+      const list = chunksRef.current;
+      const cached = new Map<number, number>();
+      let before = 0;
+      let after = 0;
+      let curDur = -1;
+      for (const [key, entry] of cacheRef.current) {
+        const sep = key.indexOf(":");
+        if (key.slice(0, sep) !== voiceRef.current) continue;
+        const i = Number(key.slice(sep + 1));
+        if (!Number.isFinite(i)) continue;
+        cached.set(i, entry.duration);
+        if (i < curIndex) before += entry.duration;
+        else if (i > curIndex) after += entry.duration;
+        else if (entry.duration > 0) curDur = entry.duration;
+      }
+      const dur = (i: number) => cached.get(i) ?? estimateChunkSeconds(i);
+      if (curDur < 0) curDur = dur(curIndex);
+      for (let i = 0; i < curIndex; i++) if (!cached.has(i)) before += dur(i);
+      for (let i = curIndex + 1; i < list.length; i++) if (!cached.has(i)) after += dur(i);
+      const elapsed = Math.max(0, Math.min(before + Math.max(0, curTime), before + curDur));
+      return { elapsed, total: Math.max(1, Math.round(before + curDur + after)) };
+    },
+    [estimateChunkSeconds]
+  );
+
+  // ---------- Caché y generación de audio ----------
+
+  const evictFarAudio = useCallback(() => {
+    const cache = cacheRef.current;
+    const cur = currentChunkRef.current;
+    if (cache.size <= MAX_CACHED_AUDIO) return;
+    for (const [key, entry] of cache) {
+      if (cache.size <= MAX_CACHED_AUDIO) break;
+      const i = Number(key.slice(key.indexOf(":") + 1));
+      if (i < cur - 2 || i > cur + PREFETCH_AHEAD + 5) {
+        URL.revokeObjectURL(entry.url);
+        cache.delete(key);
+      }
+    }
+  }, []);
+
+  /** Audio de un fragmento con la voz indicada (cacheado, sin velocidad) */
+  const getChunkAudio = useCallback(
+    async (voiceKey: VoiceGender, index: number): Promise<CachedAudio> => {
+      const key = `${voiceKey}:${index}`;
+      const hit = cacheRef.current.get(key);
+      if (hit) return hit;
+      const running = inflightRef.current.get(key);
+      if (running) return running;
+
+      const task = (async () => {
+        const text = chunksRef.current[index]?.text ?? "";
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice: voiceKey }),
+        });
+        if (!res.ok) throw new Error(`/api/tts respondió ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const duration = await audioDurationOf(url);
+        const entry: CachedAudio = { url, duration };
+        cacheRef.current.set(key, entry);
+        inflightRef.current.delete(key);
+        evictFarAudio();
+        return entry;
+      })();
+
+      inflightRef.current.set(key, task);
+      task.catch(() => inflightRef.current.delete(key));
+      return task;
+    },
+    [evictFarAudio]
+  );
+
+  /** Pregenera en silencio el siguiente fragmento (sin cortes entre partes) */
+  const prefetchRef = useRef<(voiceKey: VoiceGender, index: number) => void>(() => {});
+  const prefetch = useCallback(
+    (voiceKey: VoiceGender, index: number) => {
+      const list = chunksRef.current;
+      if (index < 0 || index >= list.length) return;
+      getChunkAudio(voiceKey, index).catch(() => {});
+    },
+    [getChunkAudio]
+  );
+  prefetchRef.current = prefetch;
 
   // ---------- Control de reproducción ----------
 
-  /** Detiene la reproducción y vuelve al inicio */
-  const stopPlayback = useCallback(
-    (resetPosition = true) => {
-      playTokenRef.current++;
-      stopResumeWatchdog();
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-      if (resetPosition) {
-        currentChunkRef.current = 0;
-        setCurrentChunk(0);
-      }
-      setState("stopped");
-      setIsLoadingChunk(false);
-      consecutiveFailuresRef.current = 0;
-      pendingRestartRef.current = false;
-      if (speedRespeakTimerRef.current) {
-        clearTimeout(speedRespeakTimerRef.current);
-        speedRespeakTimerRef.current = null;
-      }
-      lastBoundaryRef.current = { index: 0, charIndex: 0 };
-      boundaryPosRef.current = { index: currentChunkRef.current, charIndex: 0, ts: 0 };
-    },
-    [stopResumeWatchdog]
-  );
+  const stopPlayback = useCallback((resetPosition = true) => {
+    playTokenRef.current++;
+    audioRef.current?.pause();
+    if (resetPosition) {
+      currentChunkRef.current = 0;
+      setCurrentChunk(0);
+      setChunkFraction(0);
+      setElapsedSeconds(0);
+    }
+    setState("stopped");
+    setIsLoadingChunk(false);
+    consecutiveFailuresRef.current = 0;
+    pendingRestartRef.current = false;
+  }, []);
 
-  /** Finaliza la lectura completa */
   const finishPlayback = useCallback(() => {
     playTokenRef.current++;
-    stopResumeWatchdog();
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    audioRef.current?.pause();
     setState("stopped");
     setIsLoadingChunk(false);
     currentChunkRef.current = 0;
     setCurrentChunk(0);
     setChunkFraction(0);
+    setElapsedSeconds(0);
     toast({
       title: "Lectura completada",
       description: "Escuchaste el documento de principio a fin.",
     });
-  }, [stopResumeWatchdog]);
+  }, []);
 
   const finishPlaybackRef = useRef<() => void>(() => {});
   finishPlaybackRef.current = finishPlayback;
 
-  /** Maneja fallos: salta al siguiente fragmento; si fallan 3 seguidos, detiene */
-  const handleChunkFailure = useCallback(
-    (index: number, message: string) => {
-      consecutiveFailuresRef.current++;
-      if (consecutiveFailuresRef.current >= 3) {
-        stopPlayback(true);
-        toast({
-          title: "La lectura se detuvo",
-          description:
-            "Ocurrieron varios errores consecutivos con la voz del dispositivo. Intenta de nuevo.",
-          variant: "destructive",
-        });
-        return;
-      }
-      toast({
-        title: `Fragmento ${index + 1} omitido`,
-        description: message,
-        variant: "destructive",
-      });
-      if (index + 1 < chunksRef.current.length) {
-        setTimeout(() => playChunkRef.current?.(index + 1), 600);
-      } else {
-        finishPlaybackRef.current?.();
-      }
-    },
-    [stopPlayback]
-  );
-
   const handleChunkFailureRef = useRef<(index: number, message: string) => void>(() => {});
-  handleChunkFailureRef.current = handleChunkFailure;
 
-  /** Reproduce un fragmento y encadena el siguiente al terminar.
-   *  startFraction (0–1) permite empezar a mitad del fragmento
-   *  (salto con la barra de progreso). */
+  /**
+   * Reproduce un fragmento y encadena el siguiente al terminar.
+   * startFraction (0–1) permite empezar a mitad del fragmento (salto con la barra).
+   * La velocidad se aplica con playbackRate: NUNCA regenera ni reinicia el audio.
+   */
   const playChunk = useCallback(
-    (index: number, startFraction = 0) => {
+    async (index: number, startFraction = 0) => {
       const list = chunksRef.current;
+      if (list.length === 0) return;
       if (index < 0 || index >= list.length) {
         finishPlaybackRef.current?.();
         return;
       }
       const token = ++playTokenRef.current;
+      activeTokenRef.current = token;
       currentChunkRef.current = index;
       setCurrentChunk(index);
       setChunkFraction(startFraction > 0 ? Math.min(0.999, startFraction) : 0);
       setState("playing");
-
-      const startChar =
-        startFraction > 0 ? Math.floor(startFraction * (list[index]?.text.length ?? 0)) : 0;
-      lastBoundaryRef.current = { index, charIndex: startChar };
-      boundaryPosRef.current = { index, charIndex: startChar, ts: 0 };
       setIsLoadingChunk(true);
 
-      const start = () => {
+      try {
+        const { url } = await getChunkAudio(voiceRef.current, index);
+        const audio = audioRef.current;
+        if (token !== playTokenRef.current || !audio) return;
+        audio.src = url;
+        audio.playbackRate = Math.min(2, Math.max(0.5, speedRef.current));
+        audio.preservesPitch = true;
+        const target = startFraction > 0 ? Math.min(0.999, startFraction) : 0;
+        if (target > 0) {
+          const seek = () => {
+            if (audio.duration > 0) audio.currentTime = target * audio.duration;
+          };
+          if (audio.readyState >= 1) seek();
+          else audio.addEventListener("loadedmetadata", seek, { once: true });
+        }
+        await audio.play();
+        if (token === playTokenRef.current) {
+          setIsLoadingChunk(false);
+          consecutiveFailuresRef.current = 0;
+          for (let ahead = 1; ahead <= PREFETCH_AHEAD; ahead++) {
+            prefetchRef.current(voiceRef.current, index + ahead);
+          }
+        }
+      } catch (err) {
         if (token !== playTokenRef.current) return;
-        speakChunkBrowser(index, token, startChar);
-      };
-      // Chrome carga las voces de forma asíncrona: espera la primera vez
-      ensureVoices().then(start);
+        if ((err as DOMException)?.name === "AbortError") return;
+        consecutiveFailuresRef.current++;
+        if (consecutiveFailuresRef.current <= 2) {
+          // Reintento en el MISMO punto: la lectura nunca se reinicia
+          setTimeout(() => {
+            if (playTokenRef.current === token) {
+              playChunkRef.current?.(index, startFraction);
+            }
+          }, 900);
+        } else {
+          handleChunkFailureRef.current?.(index, "No se pudo generar el audio del fragmento");
+        }
+      }
     },
-    [speakChunkBrowser]
+    [getChunkAudio]
   );
 
   const playChunkRef = useRef<(index: number, startFraction?: number) => void>(() => {});
   playChunkRef.current = playChunk;
 
+  /** Salto interno: carga un fragmento y se posiciona exactamente en él */
+  const seekToChunk = useCallback(
+    async (index: number, startFraction: number, autoplay: boolean) => {
+      const list = chunksRef.current;
+      if (list.length === 0) return;
+      if (index < 0 || index >= list.length) return;
+      const token = ++playTokenRef.current;
+      activeTokenRef.current = token;
+      currentChunkRef.current = index;
+      setCurrentChunk(index);
+      setChunkFraction(Math.min(0.999, Math.max(0, startFraction)));
+      setState(autoplay ? "playing" : "paused");
+      setIsLoadingChunk(true);
+      try {
+        const { url } = await getChunkAudio(voiceRef.current, index);
+        const audio = audioRef.current;
+        if (token !== playTokenRef.current || !audio) return;
+        audio.src = url;
+        audio.playbackRate = Math.min(2, Math.max(0.5, speedRef.current));
+        audio.preservesPitch = true;
+        const seek = () => {
+          if (audio.duration > 0) {
+            audio.currentTime = Math.min(0.999, Math.max(0, startFraction)) * audio.duration;
+          }
+        };
+        if (audio.readyState >= 1) seek();
+        else audio.addEventListener("loadedmetadata", seek, { once: true });
+        if (autoplay) await audio.play();
+        if (token === playTokenRef.current) setIsLoadingChunk(false);
+      } catch (err) {
+        if (token !== playTokenRef.current) return;
+        if ((err as DOMException)?.name === "AbortError") return;
+        handleChunkFailureRef.current?.(index, "No se pudo saltar a esa parte");
+      }
+    },
+    [getChunkAudio]
+  );
+
+  const seekToChunkRef = useRef<(index: number, fraction: number, autoplay: boolean) => void>(
+    () => {}
+  );
+  seekToChunkRef.current = (index, fraction, autoplay) => {
+    void seekToChunk(index, fraction, autoplay);
+  };
+
+  // ---------- Eventos del elemento <audio> ----------
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const isRealSource = () => audio.src !== "" && !audio.src.startsWith("data:");
+
+    const onTimeUpdate = () => {
+      if (stateRef.current === "stopped") return;
+      const dur = audio.duration;
+      const frac = dur > 0 ? Math.min(0.999, Math.max(0, audio.currentTime / dur)) : 0;
+      setChunkFraction(frac);
+      const clock = computeClock(currentChunkRef.current, audio.currentTime);
+      setElapsedSeconds(clock.elapsed);
+      setTotalSeconds((prev) => (Math.abs(prev - clock.total) >= 1 ? clock.total : prev));
+    };
+
+    const onEnded = () => {
+      if (!isRealSource() || stateRef.current === "stopped") return;
+      if (playTokenRef.current !== activeTokenRef.current) return;
+      setChunkFraction(0.999);
+      const next = currentChunkRef.current + 1;
+      if (next < chunksRef.current.length) {
+        playChunkRef.current?.(next);
+      } else {
+        finishPlaybackRef.current?.();
+      }
+    };
+
+    const onError = () => {
+      if (!isRealSource() || stateRef.current === "stopped") return;
+      if (playTokenRef.current !== activeTokenRef.current) return;
+      handleChunkFailureRef.current?.(
+        currentChunkRef.current,
+        "Error al reproducir el audio del fragmento"
+      );
+    };
+
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("ended", onEnded);
+    audio.addEventListener("error", onError);
+    return () => {
+      audio.removeEventListener("timeupdate", onTimeUpdate);
+      audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("error", onError);
+    };
+  }, [computeClock]);
+
   // ---------- Acciones del usuario ----------
 
-  const handlePlayPause = useCallback(() => {
-    const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
-    if (state === "playing") {
-      if (isLoadingChunk) {
-        // Todavía no empezó a sonar: corta la cadena y marca para retomar
-        playTokenRef.current++;
-        synth?.cancel();
-        setIsLoadingChunk(false);
-        pendingRestartRef.current = true;
-      } else {
-        synth?.pause();
+  /** iOS exige una reproducción dentro del gesto del usuario */
+  const unlockAudio = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio || unlockedRef.current) return;
+    unlockedRef.current = true;
+    try {
+      audio.src = SILENT_WAV;
+      audio.volume = 0;
+      const p = audio.play();
+      if (p) {
+        p.then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.volume = 1;
+        }).catch(() => {
+          audio.volume = 1;
+        });
       }
+    } catch {
+      audio.volume = 1;
+    }
+  }, []);
+
+  const handlePlayPause = useCallback(() => {
+    if (state === "playing") {
+      audioRef.current?.pause();
       setState("paused");
       return;
     }
     if (state === "paused") {
-      // Si se cambió voz/velocidad en pausa, o el navegador no conservó la
-      // pausa (iOS), retoma desde la palabra actual con la configuración nueva
-      if (pendingRestartRef.current || !synth?.speaking) {
+      const audio = audioRef.current;
+      if (pendingRestartRef.current) {
+        // La voz se cambió en pausa: regenera el fragmento actual en el mismo punto
         pendingRestartRef.current = false;
-        const { index, charIndex } = lastBoundaryRef.current;
-        unlockSpeech();
-        const token = ++playTokenRef.current;
-        setState("playing");
-        startResumeWatchdog();
-        // Reancla el reloj en "ahora" para no contar el tiempo de pausa
-        boundaryPosRef.current = { index: currentChunkRef.current, charIndex, ts: performance.now() };
-        speakChunkBrowser(index, token, charIndex);
+        const frac = audio && audio.duration > 0 ? audio.currentTime / audio.duration : 0;
+        playChunkRef.current?.(currentChunkRef.current, frac);
         return;
       }
-      if (boundaryPosRef.current.ts > 0) {
-        boundaryPosRef.current.ts = performance.now();
+      if (audio && audio.src && !audio.src.startsWith("data:")) {
+        audio.playbackRate = Math.min(2, Math.max(0.5, speedRef.current));
+        audio
+          .play()
+          .then(() => setState("playing"))
+          .catch(() => playChunkRef.current?.(currentChunkRef.current));
+      } else {
+        playChunkRef.current?.(currentChunkRef.current);
       }
-      synth?.resume();
-      setState("playing");
-      startResumeWatchdog();
       return;
     }
     // stopped
-    unlockSpeech();
+    unlockAudio();
     playChunkRef.current?.(currentChunkRef.current);
-  }, [state, isLoadingChunk, startResumeWatchdog, unlockSpeech]);
+  }, [state, unlockAudio]);
 
   const handleStop = useCallback(() => {
     stopPlayback(true);
@@ -490,111 +488,96 @@ export default function Home() {
 
   const handlePrev = useCallback(() => {
     const target = Math.max(0, currentChunkRef.current - 1);
-    unlockSpeech();
-    playChunkRef.current?.(target);
-  }, [unlockSpeech]);
-
-  const handleNext = useCallback(() => {
-    const target = Math.min(chunksRef.current.length - 1, currentChunkRef.current + 1);
-    unlockSpeech();
-    playChunkRef.current?.(target);
-  }, [unlockSpeech]);
-
-  /** Relee desde la palabra en curso: se usa al cambiar de voz o de velocidad.
-   *  NO reinicia la lectura: continúa exactamente por el mismo punto. */
-  const respeakFromCurrentWord = useCallback(() => {
-    const { index, charIndex } = lastBoundaryRef.current;
-    if (index !== currentChunkRef.current) {
-      playChunkRef.current?.(currentChunkRef.current);
+    const playing = stateRef.current === "playing";
+    if (stateRef.current === "stopped") {
+      currentChunkRef.current = target;
+      setCurrentChunk(target);
+      setChunkFraction(0);
       return;
     }
-    const token = ++playTokenRef.current;
-    setState("playing");
-    startResumeWatchdog();
-    boundaryPosRef.current = { index, charIndex, ts: performance.now() };
-    speakChunkBrowser(index, token, charIndex);
-  }, [speakChunkBrowser, startResumeWatchdog]);
+    seekToChunkRef.current(target, 0, playing);
+  }, []);
 
-  const respeakFromCurrentWordRef = useRef<() => void>(() => {});
-  respeakFromCurrentWordRef.current = respeakFromCurrentWord;
+  const handleNext = useCallback(() => {
+    const last = Math.max(0, chunksRef.current.length - 1);
+    const target = Math.min(last, currentChunkRef.current + 1);
+    const playing = stateRef.current === "playing";
+    if (stateRef.current === "stopped") {
+      currentChunkRef.current = target;
+      setCurrentChunk(target);
+      setChunkFraction(0);
+      return;
+    }
+    seekToChunkRef.current(target, 0, playing);
+  }, []);
 
-  /** Cambio de voz (género): EXACTAMENTE una voz por género. Retoma desde la
-   *  palabra actual para que suene la voz nueva desde ese punto. */
-  const handleVoiceChange = useCallback(
-    (v: VoiceGender) => {
-      if (v === voiceRef.current) return;
-      setVoice(v);
-      voiceRef.current = v;
-      if (stateRef.current === "playing") {
-        respeakFromCurrentWordRef.current?.();
-      } else if (stateRef.current === "paused") {
-        window.speechSynthesis?.cancel();
-        pendingRestartRef.current = true;
-      }
+  /** Cambio de voz: EXACTAMENTE una voz por género, neuronal y garantizada.
+   *  Mientras lee, regenera el fragmento actual desde el MISMO punto. */
+  const handleVoiceChange = useCallback((v: VoiceGender) => {
+    if (v === voiceRef.current) return;
+    setVoice(v);
+    voiceRef.current = v;
+    if (stateRef.current === "playing") {
+      const audio = audioRef.current;
+      const frac = audio && audio.duration > 0 ? audio.currentTime / audio.duration : 0;
+      playChunkRef.current?.(currentChunkRef.current, frac);
+    } else if (stateRef.current === "paused") {
+      pendingRestartRef.current = true;
+    }
+  }, []);
+
+  /**
+   * Cambio de velocidad SIN reiniciar la lectura, JAMÁS.
+   * Solo ajusta playbackRate del audio en curso: sigue EXACTAMENTE por
+   * el mismo punto — nunca vuelve atrás, nunca se repite, nunca se corta.
+   */
+  const handleSpeedChange = useCallback((s: number) => {
+    setSpeed(s);
+    speedRef.current = s;
+    const audio = audioRef.current;
+    if (audio && audio.src && !audio.src.startsWith("data:")) {
+      audio.playbackRate = Math.min(2, Math.max(0.5, s));
+      audio.preservesPitch = true;
+    }
+  }, []);
+
+  /** Salto con la barra de audio (0–100). Solo el usuario mueve la posición. */
+  const handleSeek = useCallback((percent: number) => {
+    const list = chunksRef.current;
+    if (list.length === 0) return;
+    const clamped = Math.min(100, Math.max(0, percent));
+    const globalPos = (clamped / 100) * list.length;
+    let idx = Math.floor(globalPos);
+    idx = Math.min(list.length - 1, Math.max(0, idx));
+    const frac = Math.min(0.999, Math.max(0, globalPos - idx));
+
+    if (stateRef.current === "stopped") {
+      // Detenido: la barra elige el fragmento desde el que comenzará
+      currentChunkRef.current = idx;
+      setCurrentChunk(idx);
+      setChunkFraction(0);
+      return;
+    }
+    // Leyendo o en pausa: salta exactamente a ese punto y sigue como estaba
+    seekToChunkRef.current(idx, frac, stateRef.current === "playing");
+  }, []);
+
+  /** Detiene tras fallos repetidos (p. ej. sin internet) */
+  const handleChunkFailure = useCallback(
+    (index: number, message: string) => {
+      stopPlayback(false);
+      const offline = typeof navigator !== "undefined" && !navigator.onLine;
+      toast({
+        title: offline ? "Sin conexión a internet" : "La lectura se detuvo",
+        description: offline
+          ? "Las voces neuronales se generan por internet. Conéctate y vuelve a comenzar desde donde estabas."
+          : `${message}. Revisa tu conexión e intenta de nuevo.`,
+        variant: "destructive",
+      });
     },
-    []
+    [stopPlayback]
   );
-
-  /** Cambio de velocidad SIN reiniciar la lectura, JAMÁS:
-   *  - Lee desde la palabra en curso con la nueva velocidad (se nota al
-   *    instante y sigue por el mismo punto, sin volver al inicio).
-   *  - Si el dispositivo no reporta la palabra actual, la oración nueva ya
-   *    sale con la velocidad nueva (los segmentos son cortos, ~5 segundos).
-   *  La posición de lectura SOLO la cambia el usuario (barra o botones). */
-  const handleSpeedChange = useCallback(
-    (s: number) => {
-      setSpeed(s);
-      speedRef.current = s;
-      if (speedRespeakTimerRef.current) clearTimeout(speedRespeakTimerRef.current);
-      if (boundaryFiredRef.current && stateRef.current === "playing") {
-        // debounce: mientras se arrastra el slider, aplica una sola vez al soltar
-        speedRespeakTimerRef.current = setTimeout(() => {
-          speedRespeakTimerRef.current = null;
-          if (stateRef.current === "playing") respeakFromCurrentWordRef.current?.();
-        }, 220);
-      } else if (boundaryFiredRef.current && stateRef.current === "paused") {
-        pendingRestartRef.current = true;
-      }
-    },
-    []
-  );
-
-  /** Salto de posición con la barra de audio (0–100). Solo el usuario mueve
-   *  la posición de lectura; se retoma exactamente desde ese punto.
-   *  El mapeo usa fragmentos (igual que la barra de progreso mostrada):
-   *  así la barra y el reloj coinciden siempre con donde se salta. */
-  const handleSeek = useCallback(
-    (percent: number) => {
-      const list = chunksRef.current;
-      if (list.length === 0) return;
-
-      const clamped = Math.min(100, Math.max(0, percent));
-      const globalPos = (clamped / 100) * list.length;
-      let idx = Math.floor(globalPos);
-      idx = Math.min(list.length - 1, Math.max(0, idx));
-      const fraction = Math.min(0.999, globalPos - idx);
-      const len = list[idx].text.length || 1;
-
-      if (stateRef.current === "stopped") {
-        // Detenido: la barra elige el fragmento desde el que comenzará
-        currentChunkRef.current = idx;
-        setCurrentChunk(idx);
-        setChunkFraction(0);
-        return;
-      }
-
-      unlockSpeech();
-      const startChar = Math.floor(fraction * len);
-      const token = ++playTokenRef.current;
-      setState("playing");
-      startResumeWatchdog();
-      lastBoundaryRef.current = { index: idx, charIndex: startChar };
-      boundaryPosRef.current = { index: idx, charIndex: startChar, ts: performance.now() };
-      setIsLoadingChunk(true);
-      speakChunkBrowser(idx, token, startChar);
-    },
-    [speakChunkBrowser, startResumeWatchdog, unlockSpeech]
-  );
+  handleChunkFailureRef.current = handleChunkFailure;
 
   // ---------- Carga y análisis del documento ----------
 
@@ -615,7 +598,12 @@ export default function Home() {
           chars: parsed.chars,
           paragraphs: parsed.paragraphs,
         });
-        setChunks(splitTextIntoChunks(parsed.text));
+        const nextChunks = splitTextIntoChunks(parsed.text);
+        setChunks(nextChunks);
+        currentChunkRef.current = 0;
+        // Duración total estimada estilo reproductor (se afina con audio real)
+        setTotalSeconds(estimateSeconds(parsed.words, 1));
+        setElapsedSeconds(0);
         toast({
           title: "Documento analizado",
           description: `${parsed.words.toLocaleString("es")} palabras listas para escuchar.`,
@@ -638,6 +626,12 @@ export default function Home() {
     setWalkingOpen(false);
     setDocInfo(null);
     setChunks([]);
+    setTotalSeconds(0);
+    setElapsedSeconds(0);
+    for (const entry of cacheRef.current.values()) {
+      URL.revokeObjectURL(entry.url);
+    }
+    cacheRef.current.clear();
   }, [stopPlayback]);
 
   // ---------- Auto-scroll al fragmento actual ----------
@@ -650,8 +644,8 @@ export default function Home() {
   // ---------- Derivados ----------
 
   const estimatedSeconds = useMemo(
-    () => (docInfo ? estimateSeconds(docInfo.words, speed) : 0),
-    [docInfo, speed]
+    () => (docInfo ? estimateSeconds(docInfo.words, 1) : 0),
+    [docInfo]
   );
 
   const progressPercent =
@@ -659,16 +653,17 @@ export default function Home() {
       ? ((currentChunk + (state !== "stopped" ? chunkFraction : 0)) / totalChunks) * 100
       : 0;
 
-
   const phase = !docInfo && !isParsing ? 1 : isParsing ? 2 : 3;
 
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-emerald-50/60 via-white to-white dark:from-emerald-950/30 dark:via-zinc-950 dark:to-zinc-950">
+      {/* Elemento de audio real (motor de reproducción) */}
+      <audio ref={audioRef} preload="auto" className="hidden" aria-hidden="true" />
+
       {/* Encabezado */}
       <header className="sticky top-0 z-30 border-b border-zinc-200/80 bg-white/85 backdrop-blur dark:border-zinc-800/80 dark:bg-zinc-950/85">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
-            {/* Logo propio de LectorVoz */}
             <img
               src="/icons/icon-192.png"
               alt="Logo de LectorVoz"
@@ -681,7 +676,7 @@ export default function Home() {
                 LectorVoz
               </h1>
               <p className="text-xs text-muted-foreground">
-                Escucha tus documentos · funciona offline
+                Escucha tus documentos · voces neuronales
               </p>
             </div>
           </div>
@@ -827,8 +822,7 @@ export default function Home() {
                         ref={isActive ? activeChunkElRef : undefined}
                         onClick={() => {
                           if (state !== "stopped") {
-                            unlockSpeech();
-                            playChunkRef.current?.(chunk.index);
+                            seekToChunkRef.current(chunk.index, 0, state === "playing");
                           }
                         }}
                         className={cn(
@@ -866,7 +860,8 @@ export default function Home() {
           isLoadingChunk={isLoadingChunk}
           voice={voice}
           speed={speed}
-          totalSeconds={estimatedSeconds}
+          elapsedSeconds={elapsedSeconds}
+          totalSeconds={totalSeconds}
           onPlayPause={handlePlayPause}
           onStop={handleStop}
           onPrev={handlePrev}
@@ -886,7 +881,8 @@ export default function Home() {
         progressPercent={progressPercent}
         isLoadingChunk={isLoadingChunk}
         currentText={chunks[currentChunk]?.text ?? ""}
-        totalSeconds={estimatedSeconds}
+        elapsedSeconds={elapsedSeconds}
+        totalSeconds={totalSeconds}
         onPlayPause={handlePlayPause}
         onStop={handleStop}
         onPrev={handlePrev}

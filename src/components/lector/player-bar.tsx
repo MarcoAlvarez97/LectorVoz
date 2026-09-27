@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Forward, Maximize2, Pause, Play, Rewind, Square, Loader2 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,9 @@ interface PlayerBarProps {
   isLoadingChunk: boolean;
   voice: VoiceGender;
   speed: number;
-  /** Duración total estimada de la lectura, según la velocidad actual */
+  /** Segundos de contenido transcurridos (reloj real del reproductor) */
+  elapsedSeconds: number;
+  /** Duración total del contenido (real donde ya hay audio generado) */
   totalSeconds: number;
   onPlayPause: () => void;
   onStop: () => void;
@@ -43,6 +45,7 @@ export function PlayerBar({
   isLoadingChunk,
   voice,
   speed,
+  elapsedSeconds,
   totalSeconds,
   onPlayPause,
   onStop,
@@ -52,23 +55,49 @@ export function PlayerBar({
   onSeek,
 }: PlayerBarProps) {
   // Mientras se arrastra la barra se muestra el valor local; al soltar salta.
-  // scrubRef permite confirmar el salto aunque el navegador no dispare
-  // onValueCommit (pasa con End/Home en algunos navegadores).
+  // Radix a veces NO dispara onValueCommit (End/Home, gestos rápidos, pointer
+  // capturado por otra capa): si solo confiáramos en él, el reloj quedaría
+  // congelado en la posición del arrastre y el salto nunca ocurriría. Por eso
+  // el commit se confirma TAMBIÉN con pointerup/touchend/keyup globales.
   const [scrub, setScrub] = useState<number | null>(null);
   const scrubRef = useRef<number | null>(null);
+  const draggingRef = useRef(false);
   const display = scrub ?? progressPercent;
-  const scrubElapsed = (display / 100) * totalSeconds;
+  // Reloj izquierdo: durante el arrastre muestra la posición elegida;
+  // el resto del tiempo, el tiempo real consumido del audio.
+  const scrubElapsed = scrub !== null ? (scrub / 100) * totalSeconds : elapsedSeconds;
 
   const setScrubValue = (v: number | null) => {
     scrubRef.current = v;
     setScrub(v);
   };
+
+  const commitScrubRef = useRef<() => void>(() => {});
+
   const commitScrub = () => {
+    draggingRef.current = false;
     const v = scrubRef.current;
     if (v === null) return;
     setScrubValue(null);
     onSeek(v);
   };
+  commitScrubRef.current = commitScrub;
+
+  useEffect(() => {
+    const finish = () => {
+      if (draggingRef.current) commitScrubRef.current();
+    };
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("touchend", finish);
+    window.addEventListener("keyup", finish);
+    return () => {
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("touchend", finish);
+      window.removeEventListener("keyup", finish);
+    };
+  }, []);
 
   const statusText =
     isLoadingChunk && state === "playing"
@@ -93,6 +122,12 @@ export function PlayerBar({
             max={100}
             step={0.1}
             aria-label="Barra de audio: arrastrá para volver o avanzar"
+            onPointerDown={() => {
+              draggingRef.current = true;
+            }}
+            onKeyDown={() => {
+              draggingRef.current = true;
+            }}
             onValueChange={(values) => setScrubValue(values[0])}
             onValueCommit={(values) => {
               setScrubValue(null);

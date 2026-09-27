@@ -16,9 +16,9 @@ interface VoiceSelectorProps {
 
 /**
  * Selector de voz: EXACTAMENTE una voz por género (mujer / hombre).
- * El dispositivo aporta la voz y la app elige automáticamente la mejor
- * disponible en español para el género elegido — sin motores, sin listas
- * y sin opciones extra.
+ * Voces neuronales reales generadas como audio MP3: la mujer es siempre
+ * mujer y el hombre es siempre hombre, en cualquier dispositivo — sin
+ * voces robóticas del sistema.
  */
 export function VoiceSelector({
   voice,
@@ -36,7 +36,7 @@ export function VoiceSelector({
           onClick={() => onVoiceChange("female")}
           icon={<UserRoundCheck className="h-7 w-7" strokeWidth={1.6} />}
           title="Voz de mujer"
-          subtitle="Cálida y cercana"
+          subtitle="Dalia · cálida y clara"
           selectedClasses="ring-2 ring-rose-500 bg-rose-50 border-rose-300 dark:bg-rose-950/40 dark:border-rose-700"
           iconClasses="bg-rose-100 text-rose-600 dark:bg-rose-500/15 dark:text-rose-400"
         />
@@ -45,16 +45,16 @@ export function VoiceSelector({
           onClick={() => onVoiceChange("male")}
           icon={<UserRound className="h-7 w-7" strokeWidth={1.6} />}
           title="Voz de hombre"
-          subtitle="Grave y clara"
+          subtitle="Jorge · grave y clara"
           selectedClasses="ring-2 ring-teal-600 bg-teal-50 border-teal-300 dark:bg-teal-950/40 dark:border-teal-700"
           iconClasses="bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-400"
         />
       </div>
 
       <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-        La app elige automáticamente la mejor voz en español de tu dispositivo
-        para el género elegido: voces naturales si hay internet, o las voces
-        instaladas que funcionan sin conexión.
+        Voces neuronales en español (misma calidad en todos los equipos):
+        el audio se genera al instante y se guarda en el móvil para volver a
+        escucharlo sin regenerarlo. Requiere internet mientras lee.
       </p>
 
       {/* Velocidad */}
@@ -82,8 +82,9 @@ export function VoiceSelector({
           <span>2x · rápida</span>
         </div>
         <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
-          El cambio de velocidad se aplica en segundos y <span className="font-semibold">jamás
-          reinicia la lectura</span>: sigue exactamente por donde va, solo acelera o frena.
+          El cambio de velocidad es <span className="font-semibold">instantáneo y jamás
+          reinicia la lectura</span>: el audio sigue exactamente por el mismo punto,
+          solo acelera o frena.
         </p>
       </div>
     </div>
