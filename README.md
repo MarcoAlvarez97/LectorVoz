@@ -1,5 +1,7 @@
 # LectorVoz 🎧📖
 
+> **VERSIÓN 1.3.0 — FINAL. Todos los cambios incluidos: voces mujer/hombre correctas, sin Voz HD, velocidad sin reinicio, barra de progreso con reloj y tiempo total, 200 MB, modo claro/oscuro.**
+
 Convierte tus documentos (**PDF, Word DOCX, TXT, MD, CSV**) en audiolibros: cárgalos,
 analízalos y escúchalos en voz alta con voz de **hombre o mujer**, mientras caminas,
 cocinas o viajas.
